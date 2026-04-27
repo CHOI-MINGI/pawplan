@@ -1,0 +1,266 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           BigInt    @id @default(autoincrement())
+  email        String    @unique @db.VarChar(255)
+  passwordHash String    @map("password_hash") @db.VarChar(255)
+  name         String    @db.VarChar(100)
+  phone        String?   @db.VarChar(20)
+  status       String    @default("active") @db.VarChar(20)
+  lastLoginAt  DateTime? @map("last_login_at") @db.Timestamptz(6)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  dogs             Dog[]
+  healthLogs       HealthLog[]
+  medicalVisits    MedicalVisit[]
+  expenses         Expense[]
+  visitReports     VisitReport[]
+  visitAttachments MedicalVisitAttachment[]
+
+  @@map("users")
+}
+
+model Dog {
+  id              BigInt    @id @default(autoincrement())
+  primaryOwnerId  BigInt    @map("primary_owner_id")
+  name            String    @db.VarChar(100)
+  breed           String    @db.VarChar(100)
+  birthDate       DateTime? @map("birth_date") @db.Date
+  sex             String    @db.VarChar(10)
+  neutered        Boolean   @default(false)
+  currentWeightKg Decimal?  @map("current_weight_kg") @db.Decimal(5, 2)
+  targetWeightKg  Decimal?  @map("target_weight_kg") @db.Decimal(5, 2)
+  activityLevel   String    @default("medium") @map("activity_level") @db.VarChar(20)
+  insuranceStatus String    @default("none") @map("insurance_status") @db.VarChar(20)
+  photoUrl        String?   @map("photo_url")
+  notes           String?
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  primaryOwner  User            @relation(fields: [primaryOwnerId], references: [id])
+  conditions    DogCondition[]
+  medications   DogMedication[]
+  schedules     CareSchedule[]
+  healthLogs    HealthLog[]
+  medicalVisits MedicalVisit[]
+  expenses      Expense[]
+  forecasts     CostForecast[]
+  visitReports  VisitReport[]
+
+  @@index([primaryOwnerId], map: "idx_dogs_primary_owner_id")
+  @@index([breed], map: "idx_dogs_breed")
+  @@map("dogs")
+}
+
+model DogCondition {
+  id            BigInt    @id @default(autoincrement())
+  dogId         BigInt    @map("dog_id")
+  conditionType String    @map("condition_type") @db.VarChar(30)
+  conditionName String    @map("condition_name") @db.VarChar(100)
+  severity      String?   @db.VarChar(20)
+  diagnosedOn   DateTime? @map("diagnosed_on") @db.Date
+  status        String    @default("active") @db.VarChar(20)
+  notes         String?
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  dog Dog @relation(fields: [dogId], references: [id], onDelete: Cascade)
+
+  @@index([dogId], map: "idx_dog_conditions_dog_id")
+  @@index([conditionType], map: "idx_dog_conditions_type")
+  @@map("dog_conditions")
+}
+
+model DogMedication {
+  id             BigInt    @id @default(autoincrement())
+  dogId          BigInt    @map("dog_id")
+  medicationName String    @map("medication_name") @db.VarChar(120)
+  dosage         String?   @db.VarChar(50)
+  frequencyText  String?   @map("frequency_text") @db.VarChar(100)
+  startedOn      DateTime? @map("started_on") @db.Date
+  endedOn        DateTime? @map("ended_on") @db.Date
+  prescribedBy   String?   @map("prescribed_by") @db.VarChar(100)
+  isActive       Boolean   @default(true) @map("is_active")
+  notes          String?
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  dog Dog @relation(fields: [dogId], references: [id], onDelete: Cascade)
+
+  @@index([dogId], map: "idx_dog_medications_dog_id")
+  @@index([isActive], map: "idx_dog_medications_active")
+  @@map("dog_medications")
+}
+
+model CareSchedule {
+  id              BigInt    @id @default(autoincrement())
+  dogId           BigInt    @map("dog_id")
+  scheduleType    String    @map("schedule_type") @db.VarChar(30)
+  title           String    @db.VarChar(120)
+  description     String?
+  dueDate         DateTime  @map("due_date") @db.Date
+  repeatCycleDays Int?      @map("repeat_cycle_days")
+  priority        String    @default("medium") @db.VarChar(20)
+  status          String    @default("pending") @db.VarChar(20)
+  sourceType      String    @default("system") @map("source_type") @db.VarChar(20)
+  completedAt     DateTime? @map("completed_at") @db.Timestamptz(6)
+  reminderEnabled Boolean   @default(true) @map("reminder_enabled")
+  lastRemindedAt  DateTime? @map("last_reminded_at") @db.Timestamptz(6)
+  createdBy       BigInt?   @map("created_by")
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  dog Dog @relation(fields: [dogId], references: [id], onDelete: Cascade)
+
+  @@index([dogId], map: "idx_care_schedules_dog_id")
+  @@index([dueDate], map: "idx_care_schedules_due_date")
+  @@index([status], map: "idx_care_schedules_status")
+  @@index([scheduleType], map: "idx_care_schedules_type")
+  @@map("care_schedules")
+}
+
+model HealthLog {
+  id           BigInt   @id @default(autoincrement())
+  dogId        BigInt   @map("dog_id")
+  logType      String   @map("log_type") @db.VarChar(30)
+  title        String?  @db.VarChar(120)
+  recordedAt   DateTime @map("recorded_at") @db.Timestamptz(6)
+  valueNumeric Decimal? @map("value_numeric") @db.Decimal(10, 2)
+  valueUnit    String?  @map("value_unit") @db.VarChar(20)
+  memo         String?
+  metadata     Json?
+  createdBy    BigInt?  @map("created_by")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  dog  Dog   @relation(fields: [dogId], references: [id], onDelete: Cascade)
+  user User? @relation(fields: [createdBy], references: [id])
+
+  @@index([dogId], map: "idx_health_logs_dog_id")
+  @@index([recordedAt(sort: Desc)], map: "idx_health_logs_recorded_at")
+  @@index([logType], map: "idx_health_logs_type")
+  @@map("health_logs")
+}
+
+model MedicalVisit {
+  id               BigInt    @id @default(autoincrement())
+  dogId            BigInt    @map("dog_id")
+  hospitalName     String    @map("hospital_name") @db.VarChar(150)
+  veterinarianName String?   @map("veterinarian_name") @db.VarChar(100)
+  visitDate        DateTime  @map("visit_date") @db.Timestamptz(6)
+  visitReason      String?   @map("visit_reason") @db.VarChar(150)
+  symptoms         String?
+  diagnosis        String?
+  treatment        String?
+  prescribedItems  String?   @map("prescribed_items")
+  followUpDate     DateTime? @map("follow_up_date") @db.Date
+  notes            String?
+  createdBy        BigInt?   @map("created_by")
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  dog         Dog                      @relation(fields: [dogId], references: [id], onDelete: Cascade)
+  user        User?                    @relation(fields: [createdBy], references: [id])
+  expenses    Expense[]
+  attachments MedicalVisitAttachment[]
+
+  @@index([dogId], map: "idx_medical_visits_dog_id")
+  @@index([visitDate(sort: Desc)], map: "idx_medical_visits_visit_date")
+  @@index([hospitalName], map: "idx_medical_visits_hospital_name")
+  @@map("medical_visits")
+}
+
+model MedicalVisitAttachment {
+  id               BigInt   @id @default(autoincrement())
+  medicalVisitId   BigInt   @map("medical_visit_id")
+  fileType         String   @map("file_type") @db.VarChar(30)
+  fileUrl          String   @map("file_url")
+  originalFilename String?  @map("original_filename") @db.VarChar(255)
+  mimeType         String?  @map("mime_type") @db.VarChar(100)
+  fileSizeBytes    Int?     @map("file_size_bytes")
+  uploadedBy       BigInt?  @map("uploaded_by")
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  medicalVisit MedicalVisit @relation(fields: [medicalVisitId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [uploadedBy], references: [id])
+
+  @@index([medicalVisitId], map: "idx_medical_visit_attachments_visit_id")
+  @@index([fileType], map: "idx_medical_visit_attachments_file_type")
+  @@map("medical_visit_attachments")
+}
+
+model Expense {
+  id              BigInt   @id @default(autoincrement())
+  dogId           BigInt   @map("dog_id")
+  medicalVisitId  BigInt?  @map("medical_visit_id")
+  expenseCategory String   @map("expense_category") @db.VarChar(30)
+  amount          Decimal  @db.Decimal(12, 2)
+  expenseDate     DateTime @map("expense_date") @db.Date
+  vendorName      String?  @map("vendor_name") @db.VarChar(150)
+  memo            String?
+  receiptUrl      String?  @map("receipt_url")
+  createdBy       BigInt?  @map("created_by")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  dog          Dog           @relation(fields: [dogId], references: [id], onDelete: Cascade)
+  medicalVisit MedicalVisit? @relation(fields: [medicalVisitId], references: [id])
+  user         User?         @relation(fields: [createdBy], references: [id])
+
+  @@index([dogId], map: "idx_expenses_dog_id")
+  @@index([expenseDate(sort: Desc)], map: "idx_expenses_expense_date")
+  @@index([expenseCategory], map: "idx_expenses_category")
+  @@index([medicalVisitId], map: "idx_expenses_medical_visit_id")
+  @@map("expenses")
+}
+
+model CostForecast {
+  id               BigInt   @id @default(autoincrement())
+  dogId            BigInt   @map("dog_id")
+  scenario         String   @db.VarChar(20)
+  monthlyEstimate  Decimal  @map("monthly_estimate") @db.Decimal(12, 2)
+  rangeMin         Decimal  @map("range_min") @db.Decimal(12, 2)
+  rangeMax         Decimal  @map("range_max") @db.Decimal(12, 2)
+  yearlyEstimate   Decimal  @map("yearly_estimate") @db.Decimal(12, 2)
+  sixMonthEstimate Decimal  @map("six_month_estimate") @db.Decimal(12, 2)
+  lifetimeEstimate Decimal  @map("lifetime_estimate") @db.Decimal(14, 2)
+  confidenceLevel  String   @default("low") @map("confidence_level") @db.VarChar(20)
+  breakdown        Json     @default("{}")
+  assumptions      Json?
+  generatedBy      String   @default("system") @map("generated_by") @db.VarChar(20)
+  generatedAt      DateTime @default(now()) @map("generated_at") @db.Timestamptz(6)
+
+  dog Dog @relation(fields: [dogId], references: [id], onDelete: Cascade)
+
+  @@index([dogId], map: "idx_cost_forecasts_dog_id")
+  @@index([generatedAt(sort: Desc)], map: "idx_cost_forecasts_generated_at")
+  @@index([scenario], map: "idx_cost_forecasts_scenario")
+  @@map("cost_forecasts")
+}
+
+model VisitReport {
+  id           BigInt   @id @default(autoincrement())
+  dogId        BigInt   @map("dog_id")
+  reportType   String   @default("vet_visit_summary") @map("report_type") @db.VarChar(30)
+  title        String   @db.VarChar(150)
+  summaryJson  Json     @map("summary_json")
+  renderedText String?  @map("rendered_text")
+  pdfUrl       String?  @map("pdf_url")
+  generatedBy  BigInt?  @map("generated_by")
+  generatedAt  DateTime @default(now()) @map("generated_at") @db.Timestamptz(6)
+
+  dog  Dog   @relation(fields: [dogId], references: [id], onDelete: Cascade)
+  user User? @relation(fields: [generatedBy], references: [id])
+
+  @@index([dogId], map: "idx_visit_reports_dog_id")
+  @@index([generatedAt(sort: Desc)], map: "idx_visit_reports_generated_at")
+  @@map("visit_reports")
+}

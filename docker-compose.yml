@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pawplan-postgres
+    environment:
+      POSTGRES_DB: pawplan
+      POSTGRES_USER: pawplan
+      POSTGRES_PASSWORD: pawplan
+    ports:
+      - "5432:5432"
+    volumes:
+      - pawplan-postgres-data:/var/lib/postgresql/data
+
+volumes:
+  pawplan-postgres-data:

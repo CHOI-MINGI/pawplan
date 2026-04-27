@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+uploads/
+.logs/
+.playwright-mcp/
+backend-dev.log
+backend/node_modules/
+backend/dist/
+backend/.env

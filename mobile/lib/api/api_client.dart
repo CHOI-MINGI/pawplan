@@ -1,0 +1,642 @@
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
+
+typedef JsonMap = Map<String, dynamic>;
+
+class ApiException implements Exception {
+  ApiException(this.message, {this.code, this.statusCode});
+
+  final String message;
+  final String? code;
+  final int? statusCode;
+
+  @override
+  String toString() => message;
+}
+
+class ApiClient {
+  ApiClient({String? baseUrl, http.Client? httpClient})
+    : baseUrl = baseUrl ?? resolveDefaultApiBaseUrl(),
+      _http = httpClient ?? http.Client();
+
+  final String baseUrl;
+  final http.Client _http;
+  String? _accessToken;
+
+  bool get isAuthenticated => _accessToken != null;
+  String? get accessToken => _accessToken;
+
+  void setSessionToken(String? token) {
+    _accessToken = token;
+  }
+
+  void clearSession() {
+    _accessToken = null;
+  }
+
+  Future<JsonMap> register({
+    required String email,
+    required String password,
+    required String name,
+  }) {
+    return _request<JsonMap>(
+      'POST',
+      '/auth/register',
+      body: {'email': email, 'password': password, 'name': name},
+    );
+  }
+
+  Future<JsonMap> login({
+    required String email,
+    required String password,
+  }) async {
+    final data = await _request<JsonMap>(
+      'POST',
+      '/auth/login',
+      body: {'email': email, 'password': password},
+    );
+    _accessToken = data['accessToken'] as String?;
+    return data;
+  }
+
+  Future<List<JsonMap>> dogs() async {
+    final data = await _request<List<dynamic>>('GET', '/dogs');
+    return data.cast<JsonMap>();
+  }
+
+  Future<JsonMap> me() {
+    return _request<JsonMap>('GET', '/auth/me');
+  }
+
+  Future<JsonMap> onboardDog(JsonMap payload) {
+    return _request<JsonMap>('POST', '/onboarding/dogs', body: payload);
+  }
+
+  Future<JsonMap> updateDog({required int dogId, required JsonMap payload}) {
+    return _request<JsonMap>('PATCH', '/dogs/$dogId', body: payload);
+  }
+
+  Future<JsonMap> dashboard(int dogId) {
+    return _request<JsonMap>('GET', '/dogs/$dogId/dashboard');
+  }
+
+  Future<List<JsonMap>> careSchedules(int dogId) async {
+    final data = await _request<List<dynamic>>(
+      'GET',
+      '/dogs/$dogId/care-schedules?status=pending',
+    );
+    return data.cast<JsonMap>();
+  }
+
+  Future<List<JsonMap>> healthLogs(int dogId) async {
+    final data = await _pagedList('/dogs/$dogId/health-logs?pageSize=50');
+    return data;
+  }
+
+  Future<List<JsonMap>> medicalVisits(int dogId) async {
+    final data = await _pagedList('/dogs/$dogId/medical-visits?pageSize=50');
+    return data;
+  }
+
+  Future<List<JsonMap>> visitAttachments(int visitId) async {
+    final data = await _request<List<dynamic>>(
+      'GET',
+      '/medical-visits/$visitId/attachments',
+    );
+    return data.cast<JsonMap>();
+  }
+
+  Future<List<JsonMap>> expenses(int dogId) async {
+    final data = await _pagedList('/dogs/$dogId/expenses?pageSize=50');
+    return data;
+  }
+
+  Future<List<JsonMap>> timeline(int dogId) async {
+    final data = await _pagedList('/dogs/$dogId/timeline?pageSize=60');
+    return data;
+  }
+
+  Future<List<JsonMap>> visitReports(int dogId) async {
+    final data = await _pagedList('/dogs/$dogId/visit-reports?pageSize=20');
+    return data;
+  }
+
+  Future<List<JsonMap>> conditions(int dogId) async {
+    final data = await _request<List<dynamic>>(
+      'GET',
+      '/dogs/$dogId/conditions',
+    );
+    return data.cast<JsonMap>();
+  }
+
+  Future<List<JsonMap>> medications(int dogId) async {
+    final data = await _request<List<dynamic>>(
+      'GET',
+      '/dogs/$dogId/medications',
+    );
+    return data.cast<JsonMap>();
+  }
+
+  Future<JsonMap> createCondition({
+    required int dogId,
+    required String conditionType,
+    required String conditionName,
+    required String severity,
+    required String diagnosedOn,
+    required String status,
+    required String notes,
+  }) {
+    return _request<JsonMap>(
+      'POST',
+      '/dogs/$dogId/conditions',
+      body: {
+        'conditionType': conditionType,
+        'conditionName': conditionName,
+        'severity': severity,
+        'diagnosedOn': diagnosedOn.trim().isEmpty ? null : diagnosedOn,
+        'status': status,
+        'notes': notes,
+      },
+    );
+  }
+
+  Future<JsonMap> updateCondition({
+    required int conditionId,
+    required String conditionType,
+    required String conditionName,
+    required String severity,
+    required String diagnosedOn,
+    required String status,
+    required String notes,
+  }) {
+    return _request<JsonMap>(
+      'PATCH',
+      '/conditions/$conditionId',
+      body: {
+        'conditionType': conditionType,
+        'conditionName': conditionName,
+        'severity': severity,
+        'diagnosedOn': diagnosedOn.trim().isEmpty ? null : diagnosedOn,
+        'status': status,
+        'notes': notes,
+      },
+    );
+  }
+
+  Future<JsonMap> deleteCondition(int conditionId) {
+    return _request<JsonMap>('DELETE', '/conditions/$conditionId');
+  }
+
+  Future<JsonMap> createMedication({
+    required int dogId,
+    required String medicationName,
+    required String dosage,
+    required String frequencyText,
+    required String startedOn,
+    required String endedOn,
+    required String prescribedBy,
+    required bool isActive,
+    required String notes,
+  }) {
+    return _request<JsonMap>(
+      'POST',
+      '/dogs/$dogId/medications',
+      body: {
+        'medicationName': medicationName,
+        'dosage': dosage,
+        'frequencyText': frequencyText,
+        'startedOn': startedOn.trim().isEmpty ? null : startedOn,
+        'endedOn': endedOn.trim().isEmpty ? null : endedOn,
+        'prescribedBy': prescribedBy,
+        'isActive': isActive,
+        'notes': notes,
+      },
+    );
+  }
+
+  Future<JsonMap> updateMedication({
+    required int medicationId,
+    required String medicationName,
+    required String dosage,
+    required String frequencyText,
+    required String startedOn,
+    required String endedOn,
+    required String prescribedBy,
+    required bool isActive,
+    required String notes,
+  }) {
+    return _request<JsonMap>(
+      'PATCH',
+      '/medications/$medicationId',
+      body: {
+        'medicationName': medicationName,
+        'dosage': dosage,
+        'frequencyText': frequencyText,
+        'startedOn': startedOn.trim().isEmpty ? null : startedOn,
+        'endedOn': endedOn.trim().isEmpty ? null : endedOn,
+        'prescribedBy': prescribedBy,
+        'isActive': isActive,
+        'notes': notes,
+      },
+    );
+  }
+
+  Future<JsonMap> deleteMedication(int medicationId) {
+    return _request<JsonMap>('DELETE', '/medications/$medicationId');
+  }
+
+  Future<JsonMap> completeSchedule(int scheduleId) {
+    return _request<JsonMap>('POST', '/care-schedules/$scheduleId/complete');
+  }
+
+  Future<JsonMap> createCareSchedule({
+    required int dogId,
+    required String scheduleType,
+    required String title,
+    required String dueDate,
+    required String description,
+    required String priority,
+    int? repeatCycleDays,
+  }) {
+    final body = <String, dynamic>{
+      'scheduleType': scheduleType,
+      'title': title,
+      'dueDate': dueDate,
+      'description': description,
+      'priority': priority,
+    };
+    if (repeatCycleDays != null) {
+      body['repeatCycleDays'] = repeatCycleDays;
+    }
+
+    return _request<JsonMap>('POST', '/dogs/$dogId/care-schedules', body: body);
+  }
+
+  Future<JsonMap> updateCareSchedule({
+    required int scheduleId,
+    required String title,
+    required String dueDate,
+    required String description,
+    required String priority,
+    required bool reminderEnabled,
+  }) {
+    return _request<JsonMap>(
+      'PATCH',
+      '/care-schedules/$scheduleId',
+      body: {
+        'title': title,
+        'dueDate': dueDate,
+        'description': description,
+        'priority': priority,
+        'reminderEnabled': reminderEnabled,
+      },
+    );
+  }
+
+  Future<JsonMap> skipSchedule(int scheduleId) {
+    return _request<JsonMap>('POST', '/care-schedules/$scheduleId/skip');
+  }
+
+  Future<JsonMap> latestForecast(int dogId) {
+    return _request<JsonMap>('GET', '/dogs/$dogId/cost-forecasts/latest');
+  }
+
+  Future<List<JsonMap>> forecastHistory(int dogId) async {
+    final data = await _pagedList(
+      '/dogs/$dogId/cost-forecasts/history?pageSize=30',
+    );
+    return data;
+  }
+
+  Future<JsonMap> recalculateForecast(int dogId) {
+    return _request<JsonMap>('POST', '/dogs/$dogId/cost-forecasts/recalculate');
+  }
+
+  Future<JsonMap> createHealthLog({
+    required int dogId,
+    required String logType,
+    required String title,
+    String? memo,
+    num? valueNumeric,
+    String? valueUnit,
+  }) {
+    final body = <String, dynamic>{'logType': logType, 'title': title};
+    if (memo != null && memo.trim().isNotEmpty) {
+      body['memo'] = memo;
+    }
+    if (valueNumeric != null) {
+      body['valueNumeric'] = valueNumeric;
+    }
+    if (valueUnit != null && valueUnit.trim().isNotEmpty) {
+      body['valueUnit'] = valueUnit;
+    }
+
+    return _request<JsonMap>('POST', '/dogs/$dogId/health-logs', body: body);
+  }
+
+  Future<JsonMap> updateHealthLog({
+    required int logId,
+    required String logType,
+    required String title,
+    required String memo,
+    num? valueNumeric,
+    String? valueUnit,
+  }) {
+    final body = <String, dynamic>{
+      'logType': logType,
+      'title': title,
+      'memo': memo,
+    };
+    if (valueNumeric != null) {
+      body['valueNumeric'] = valueNumeric;
+    }
+    if (valueUnit?.trim().isNotEmpty ?? false) {
+      body['valueUnit'] = valueUnit;
+    }
+
+    return _request<JsonMap>('PATCH', '/health-logs/$logId', body: body);
+  }
+
+  Future<JsonMap> deleteHealthLog(int logId) {
+    return _request<JsonMap>('DELETE', '/health-logs/$logId');
+  }
+
+  Future<JsonMap> createExpense({
+    required int dogId,
+    required String category,
+    required num amount,
+    String? vendorName,
+    String? memo,
+  }) {
+    return _request<JsonMap>(
+      'POST',
+      '/dogs/$dogId/expenses',
+      body: {
+        'expenseCategory': category,
+        'amount': amount,
+        if (vendorName != null && vendorName.trim().isNotEmpty)
+          'vendorName': vendorName,
+        if (memo != null && memo.trim().isNotEmpty) 'memo': memo,
+      },
+    );
+  }
+
+  Future<JsonMap> updateExpense({
+    required int expenseId,
+    required String category,
+    required num amount,
+    required String expenseDate,
+    required String vendorName,
+    required String memo,
+  }) {
+    return _request<JsonMap>(
+      'PATCH',
+      '/expenses/$expenseId',
+      body: {
+        'expenseCategory': category,
+        'amount': amount,
+        if (expenseDate.trim().isNotEmpty) 'expenseDate': expenseDate,
+        'vendorName': vendorName,
+        'memo': memo,
+      },
+    );
+  }
+
+  Future<JsonMap> deleteExpense(int expenseId) {
+    return _request<JsonMap>('DELETE', '/expenses/$expenseId');
+  }
+
+  Future<JsonMap> createMedicalVisit({
+    required int dogId,
+    required String hospitalName,
+    required String visitReason,
+    required String symptoms,
+    required String diagnosis,
+    required String treatment,
+    required String prescribedItems,
+    required String followUpDate,
+    required num? expenseAmount,
+  }) {
+    return _request<JsonMap>(
+      'POST',
+      '/dogs/$dogId/medical-visits',
+      body: {
+        'hospitalName': hospitalName,
+        if (visitReason.trim().isNotEmpty) 'visitReason': visitReason,
+        if (symptoms.trim().isNotEmpty) 'symptoms': symptoms,
+        if (diagnosis.trim().isNotEmpty) 'diagnosis': diagnosis,
+        if (treatment.trim().isNotEmpty) 'treatment': treatment,
+        if (prescribedItems.trim().isNotEmpty)
+          'prescribedItems': prescribedItems,
+        if (followUpDate.trim().isNotEmpty) 'followUpDate': followUpDate,
+        if (expenseAmount != null && expenseAmount > 0)
+          'expense': {
+            'create': true,
+            'amount': expenseAmount,
+            'vendorName': hospitalName,
+          },
+      },
+    );
+  }
+
+  Future<JsonMap> updateMedicalVisit({
+    required int visitId,
+    required String hospitalName,
+    required String visitReason,
+    required String symptoms,
+    required String diagnosis,
+    required String treatment,
+    required String prescribedItems,
+    required String followUpDate,
+    required String notes,
+  }) {
+    return _request<JsonMap>(
+      'PATCH',
+      '/medical-visits/$visitId',
+      body: {
+        'hospitalName': hospitalName,
+        'visitReason': visitReason,
+        'symptoms': symptoms,
+        'diagnosis': diagnosis,
+        'treatment': treatment,
+        'prescribedItems': prescribedItems,
+        if (followUpDate.trim().isNotEmpty) 'followUpDate': followUpDate,
+        'notes': notes,
+      },
+    );
+  }
+
+  Future<JsonMap> deleteMedicalVisit(int visitId) {
+    return _request<JsonMap>('DELETE', '/medical-visits/$visitId');
+  }
+
+  Future<JsonMap> uploadVisitAttachment({
+    required int visitId,
+    required String fileType,
+    required String filename,
+    required Uint8List bytes,
+  }) async {
+    final uri = Uri.parse(
+      '${baseUrl.replaceAll(RegExp(r'/$'), '')}/medical-visits/$visitId/attachments',
+    );
+    final request = http.MultipartRequest('POST', uri)
+      ..headers.addAll({
+        'Accept': 'application/json',
+        if (_accessToken != null) 'Authorization': 'Bearer $_accessToken',
+      })
+      ..fields['fileType'] = fileType
+      ..files.add(
+        http.MultipartFile.fromBytes('file', bytes, filename: filename),
+      );
+
+    try {
+      final streamed = await _http.send(request);
+      final response = await http.Response.fromStream(streamed);
+      return _decodeResponse<JsonMap>(response);
+    } on http.ClientException {
+      throw ApiException(
+        'API 서버 연결에 실패했습니다. 백엔드 서버와 API 주소를 확인하세요. ($baseUrl)',
+        code: 'NETWORK_ERROR',
+      );
+    }
+  }
+
+  Future<Uint8List> downloadAttachment(int attachmentId) async {
+    final uri = Uri.parse(
+      '${baseUrl.replaceAll(RegExp(r'/$'), '')}/attachments/$attachmentId/download',
+    );
+    try {
+      final response = await _http.get(
+        uri,
+        headers: {
+          if (_accessToken != null) 'Authorization': 'Bearer $_accessToken',
+        },
+      );
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw ApiException(
+          '첨부파일 다운로드에 실패했습니다.',
+          statusCode: response.statusCode,
+        );
+      }
+      return response.bodyBytes;
+    } on http.ClientException {
+      throw ApiException(
+        'API 서버 연결에 실패했습니다. 백엔드 서버와 API 주소를 확인하세요. ($baseUrl)',
+        code: 'NETWORK_ERROR',
+      );
+    }
+  }
+
+  Future<JsonMap> deleteAttachment(int attachmentId) {
+    return _request<JsonMap>('DELETE', '/attachments/$attachmentId');
+  }
+
+  Future<JsonMap> generateVisitReport(int dogId) {
+    return _request<JsonMap>('POST', '/dogs/$dogId/visit-reports');
+  }
+
+  Future<JsonMap?> latestVisitReport(int dogId) {
+    return _request<JsonMap?>('GET', '/dogs/$dogId/visit-reports/latest');
+  }
+
+  Future<List<JsonMap>> _pagedList(String path) async {
+    final data = await _request<JsonMap>('GET', path);
+    return (data['items'] as List<dynamic>? ?? []).cast<JsonMap>();
+  }
+
+  Future<T> _request<T>(String method, String path, {JsonMap? body}) async {
+    final uri = Uri.parse('${baseUrl.replaceAll(RegExp(r'/$'), '')}$path');
+    final headers = <String, String>{
+      'Accept': 'application/json',
+      if (body != null) 'Content-Type': 'application/json',
+      if (_accessToken != null) 'Authorization': 'Bearer $_accessToken',
+    };
+
+    late http.Response response;
+    try {
+      switch (method) {
+        case 'GET':
+          response = await _http.get(uri, headers: headers);
+        case 'POST':
+          response = await _http.post(
+            uri,
+            headers: headers,
+            body: body == null ? null : jsonEncode(body),
+          );
+        case 'PATCH':
+          response = await _http.patch(
+            uri,
+            headers: headers,
+            body: body == null ? null : jsonEncode(body),
+          );
+        case 'DELETE':
+          response = await _http.delete(
+            uri,
+            headers: headers,
+            body: body == null ? null : jsonEncode(body),
+          );
+        default:
+          throw ArgumentError('Unsupported method: $method');
+      }
+    } on http.ClientException {
+      throw ApiException(
+        'API 서버 연결에 실패했습니다. 백엔드 서버와 API 주소를 확인하세요. ($baseUrl)',
+        code: 'NETWORK_ERROR',
+      );
+    }
+
+    return _decodeResponse<T>(response);
+  }
+
+  T _decodeResponse<T>(http.Response response) {
+    late JsonMap decoded;
+    try {
+      decoded = response.body.isEmpty
+          ? <String, dynamic>{}
+          : jsonDecode(response.body) as JsonMap;
+    } on FormatException {
+      throw ApiException(
+        'API 응답을 해석할 수 없습니다.',
+        code: 'INVALID_RESPONSE',
+        statusCode: response.statusCode,
+      );
+    }
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final error = decoded['error'] as JsonMap?;
+      throw ApiException(
+        error?['message'] as String? ?? 'API request failed',
+        code: error?['code'] as String?,
+        statusCode: response.statusCode,
+      );
+    }
+
+    if (decoded['success'] != true) {
+      throw ApiException(
+        'Unexpected API response',
+        statusCode: response.statusCode,
+      );
+    }
+
+    return decoded['data'] as T;
+  }
+}
+
+String resolveDefaultApiBaseUrl() {
+  const configured = String.fromEnvironment('API_BASE_URL');
+  if (configured.isNotEmpty) {
+    return configured;
+  }
+
+  final hostRunsOnDeveloperMachine =
+      kIsWeb ||
+      defaultTargetPlatform == TargetPlatform.windows ||
+      defaultTargetPlatform == TargetPlatform.macOS ||
+      defaultTargetPlatform == TargetPlatform.linux;
+
+  return hostRunsOnDeveloperMachine
+      ? 'http://localhost:4000/api/v1'
+      : 'http://10.0.2.2:4000/api/v1';
+}

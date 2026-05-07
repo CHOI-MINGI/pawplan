@@ -61,6 +61,18 @@ typedef AttachmentUploader =
     });
 
 typedef DogUpdater = Future<void> Function(JsonMap payload);
+typedef DogDeletePreviewLoader = Future<JsonMap> Function(int dogId);
+typedef DogDeleter = Future<void> Function(int dogId);
+typedef DogMembersLoader = Future<List<JsonMap>> Function(int dogId);
+typedef DogMemberAdder =
+    Future<JsonMap> Function({
+      required int dogId,
+      required String email,
+      required String role,
+    });
+typedef DogMembershipUpdater =
+    Future<JsonMap> Function({required int membershipId, required String role});
+typedef DogMembershipRemover = Future<void> Function(int membershipId);
 
 typedef ScheduleCreator =
     Future<void> Function({
@@ -477,6 +489,51 @@ class _AppHomeState extends State<_AppHome> {
           ..addAll(dogs);
       });
     });
+  }
+
+  Future<void> _deleteDog(int dogId) {
+    return _run(() async {
+      await widget.apiClient.deleteDog(dogId);
+      await _loadDogs();
+    });
+  }
+
+  Future<JsonMap> _loadDogDeletePreview(int dogId) {
+    return widget.apiClient.dogDeletePreview(dogId);
+  }
+
+  Future<JsonMap> _loadMe() {
+    return widget.apiClient.me();
+  }
+
+  Future<List<JsonMap>> _loadDogMembers(int dogId) {
+    return widget.apiClient.dogMembers(dogId);
+  }
+
+  Future<JsonMap> _addDogMember({
+    required int dogId,
+    required String email,
+    required String role,
+  }) {
+    return widget.apiClient.addDogMember(
+      dogId: dogId,
+      email: email,
+      role: role,
+    );
+  }
+
+  Future<JsonMap> _updateDogMembership({
+    required int membershipId,
+    required String role,
+  }) {
+    return widget.apiClient.updateDogMembership(
+      membershipId: membershipId,
+      role: role,
+    );
+  }
+
+  Future<void> _removeDogMembership(int membershipId) async {
+    await widget.apiClient.removeDogMembership(membershipId);
   }
 
   Future<void> _completeSchedule(int scheduleId) {
@@ -914,6 +971,13 @@ class _AppHomeState extends State<_AppHome> {
         onSelectDog: _selectDog,
         onRefresh: () => _run(_loadDashboard),
         onUpdateDog: _updateDog,
+        onLoadDogDeletePreview: _loadDogDeletePreview,
+        onDeleteDog: _deleteDog,
+        onLoadMe: _loadMe,
+        onLoadDogMembers: _loadDogMembers,
+        onAddDogMember: _addDogMember,
+        onUpdateDogMembership: _updateDogMembership,
+        onRemoveDogMembership: _removeDogMembership,
         onCompleteSchedule: _completeSchedule,
         onCreateSchedule: _createSchedule,
         onUpdateSchedule: _updateSchedule,
@@ -1498,6 +1562,13 @@ class DashboardScreen extends StatefulWidget {
     required this.onSelectDog,
     required this.onRefresh,
     required this.onUpdateDog,
+    required this.onLoadDogDeletePreview,
+    required this.onDeleteDog,
+    required this.onLoadMe,
+    required this.onLoadDogMembers,
+    required this.onAddDogMember,
+    required this.onUpdateDogMembership,
+    required this.onRemoveDogMembership,
     required this.onCompleteSchedule,
     required this.onCreateSchedule,
     required this.onUpdateSchedule,
@@ -1542,6 +1613,13 @@ class DashboardScreen extends StatefulWidget {
   final Future<void> Function(int dogId) onSelectDog;
   final Future<void> Function() onRefresh;
   final DogUpdater onUpdateDog;
+  final DogDeletePreviewLoader onLoadDogDeletePreview;
+  final DogDeleter onDeleteDog;
+  final Future<JsonMap> Function() onLoadMe;
+  final DogMembersLoader onLoadDogMembers;
+  final DogMemberAdder onAddDogMember;
+  final DogMembershipUpdater onUpdateDogMembership;
+  final DogMembershipRemover onRemoveDogMembership;
   final Future<void> Function(int scheduleId) onCompleteSchedule;
   final ScheduleCreator onCreateSchedule;
   final ScheduleUpdater onUpdateSchedule;
@@ -1615,6 +1693,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Future<void> Function(int dogId) get onSelectDog => widget.onSelectDog;
   Future<void> Function() get onRefresh => widget.onRefresh;
   DogUpdater get onUpdateDog => widget.onUpdateDog;
+  DogDeletePreviewLoader get onLoadDogDeletePreview =>
+      widget.onLoadDogDeletePreview;
+  DogDeleter get onDeleteDog => widget.onDeleteDog;
+  Future<JsonMap> Function() get onLoadMe => widget.onLoadMe;
+  DogMembersLoader get onLoadDogMembers => widget.onLoadDogMembers;
+  DogMemberAdder get onAddDogMember => widget.onAddDogMember;
+  DogMembershipUpdater get onUpdateDogMembership =>
+      widget.onUpdateDogMembership;
+  DogMembershipRemover get onRemoveDogMembership =>
+      widget.onRemoveDogMembership;
   Future<void> Function(int scheduleId) get onCompleteSchedule =>
       widget.onCompleteSchedule;
   ScheduleCreator get onCreateSchedule => widget.onCreateSchedule;
@@ -1681,6 +1769,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final totalAmount = _asNum(monthlySummary?['totalAmount']) ?? 0;
     final basicForecast = forecast?['basic'] as JsonMap?;
     final latestForecast = dashboard?['latestForecast'] as JsonMap?;
+    final access = dashboard?['access'] as JsonMap?;
+    final canManageDog = access?['canManage'] == true;
+    final role = access?['role'] as String?;
+    final canEditRecords = role == 'owner' || role == 'editor';
     final recentHealthLogs =
         (dashboard?['recentHealthLogs'] as List<dynamic>? ?? [])
             .cast<JsonMap>();
@@ -1746,7 +1838,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           dogName: dogName,
                           breed: breed,
                           busy: busy,
+                          canManageDog: canManageDog,
                           onEditDog: onUpdateDog,
+                          onLoadDeletePreview: onLoadDogDeletePreview,
+                          onDeleteDog: onDeleteDog,
+                          onLoadMe: onLoadMe,
+                          onLoadMembers: onLoadDogMembers,
+                          onAddMember: onAddDogMember,
+                          onUpdateMembership: onUpdateDogMembership,
+                          onRemoveMembership: onRemoveDogMembership,
                           onCreateReport: busy ? null : onCreateVisitReport,
                         ),
                         const SizedBox(height: 18),
@@ -1784,6 +1884,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               schedules: schedules,
                               recentHealthLogs: recentHealthLogs,
                               busy: busy,
+                              canEditRecords: canEditRecords,
                               onCompleteSchedule: onCompleteSchedule,
                               onCreateSchedule: onCreateSchedule,
                               onUpdateSchedule: onUpdateSchedule,
@@ -1800,6 +1901,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               medicalVisits: medicalVisits,
                               expenses: expenses,
                               timelineItems: timelineItems,
+                              canEditRecords: canEditRecords,
                               onUpdateHealthLog: onUpdateHealthLog,
                               onDeleteHealthLog: onDeleteHealthLog,
                               onUpdateExpense: onUpdateExpense,
@@ -1812,6 +1914,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             2 => _HealthInfoPane(
                               key: const ValueKey('health-info'),
                               busy: busy,
+                              canEditRecords: canEditRecords,
                               conditions: conditions,
                               medications: medications,
                               onCreateCondition: onCreateCondition,
@@ -1826,6 +1929,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               report: report,
                               visitReports: visitReports,
                               busy: busy,
+                              canEditRecords: canEditRecords,
                               forecast: basicForecast,
                               fallbackForecast: latestForecast,
                               forecastHistory: forecastHistory,
@@ -1925,6 +2029,7 @@ class _OverviewPane extends StatelessWidget {
     required this.schedules,
     required this.recentHealthLogs,
     required this.busy,
+    required this.canEditRecords,
     required this.onCompleteSchedule,
     required this.onCreateSchedule,
     required this.onUpdateSchedule,
@@ -1941,6 +2046,7 @@ class _OverviewPane extends StatelessWidget {
   final List<JsonMap> schedules;
   final List<JsonMap> recentHealthLogs;
   final bool busy;
+  final bool canEditRecords;
   final Future<void> Function(int scheduleId) onCompleteSchedule;
   final ScheduleCreator onCreateSchedule;
   final ScheduleUpdater onUpdateSchedule;
@@ -2030,7 +2136,7 @@ class _OverviewPane extends StatelessWidget {
           title: '돌봄 일정',
           trailing: TextButton.icon(
             key: const ValueKey('schedule-create-open'),
-            onPressed: busy
+            onPressed: busy || !canEditRecords
                 ? null
                 : () => _showScheduleEditor(context, null, onCreateSchedule),
             icon: const Icon(Icons.add),
@@ -2045,12 +2151,14 @@ class _OverviewPane extends StatelessWidget {
                         (schedule) => _ScheduleRow(
                           schedule: schedule,
                           onComplete: busy
+                              || !canEditRecords
                               ? null
                               : () {
                                   final id = _asInt(schedule['id']);
                                   if (id != null) onCompleteSchedule(id);
                                 },
                           onEdit: busy
+                              || !canEditRecords
                               ? null
                               : () => _showScheduleEditor(
                                   context,
@@ -2059,6 +2167,7 @@ class _OverviewPane extends StatelessWidget {
                                   onUpdate: onUpdateSchedule,
                                 ),
                           onSkip: busy
+                              || !canEditRecords
                               ? null
                               : () {
                                   final id = _asInt(schedule['id']);
@@ -2081,12 +2190,18 @@ class _OverviewPane extends StatelessWidget {
                 ),
         ),
         const SizedBox(height: 18),
-        QuickHealthLogPanel(busy: busy, onSubmit: onCreateHealthLog),
+        QuickHealthLogPanel(
+          busy: busy || !canEditRecords,
+          onSubmit: onCreateHealthLog,
+        ),
         const SizedBox(height: 18),
-        QuickExpensePanel(busy: busy, onSubmit: onCreateExpense),
+        QuickExpensePanel(
+          busy: busy || !canEditRecords,
+          onSubmit: onCreateExpense,
+        ),
         const SizedBox(height: 18),
         MedicalVisitPanel(
-          busy: busy,
+          busy: busy || !canEditRecords,
           onSubmit: onCreateMedicalVisit,
           onCreateReport: onCreateVisitReport,
         ),
@@ -2099,6 +2214,7 @@ class _RecordsPane extends StatefulWidget {
   const _RecordsPane({
     super.key,
     required this.busy,
+    required this.canEditRecords,
     required this.healthLogs,
     required this.medicalVisits,
     required this.expenses,
@@ -2114,6 +2230,7 @@ class _RecordsPane extends StatefulWidget {
   });
 
   final bool busy;
+  final bool canEditRecords;
   final List<JsonMap> healthLogs;
   final List<JsonMap> medicalVisits;
   final List<JsonMap> expenses;
@@ -2239,14 +2356,14 @@ class _RecordsPaneState extends State<_RecordsPane> {
                       .map(
                         (log) => _HealthLogTile(
                           log: log,
-                          onEdit: widget.busy
+                          onEdit: widget.busy || !widget.canEditRecords
                               ? null
                               : () => _showHealthLogEditor(
                                   context,
                                   log,
                                   widget.onUpdateHealthLog,
                                 ),
-                          onDelete: widget.busy
+                          onDelete: widget.busy || !widget.canEditRecords
                               ? null
                               : () => _confirmAndDelete(
                                   context: context,
@@ -2270,17 +2387,17 @@ class _RecordsPaneState extends State<_RecordsPane> {
                       .map(
                         (visit) => _MedicalVisitTile(
                           visit: visit,
-                          busy: widget.busy,
+                          busy: widget.busy || !widget.canEditRecords,
                           onUploadAttachment: widget.onUploadAttachment,
                           onDeleteAttachment: widget.onDeleteAttachment,
-                          onEdit: widget.busy
+                          onEdit: widget.busy || !widget.canEditRecords
                               ? null
                               : () => _showMedicalVisitEditor(
                                   context,
                                   visit,
                                   widget.onUpdateMedicalVisit,
                                 ),
-                          onDelete: widget.busy
+                          onDelete: widget.busy || !widget.canEditRecords
                               ? null
                               : () => _confirmAndDelete(
                                   context: context,
@@ -2304,14 +2421,14 @@ class _RecordsPaneState extends State<_RecordsPane> {
                       .map(
                         (expense) => _ExpenseTile(
                           expense: expense,
-                          onEdit: widget.busy
+                          onEdit: widget.busy || !widget.canEditRecords
                               ? null
                               : () => _showExpenseEditor(
                                   context,
                                   expense,
                                   widget.onUpdateExpense,
                                 ),
-                          onDelete: widget.busy
+                          onDelete: widget.busy || !widget.canEditRecords
                               ? null
                               : () => _confirmAndDelete(
                                   context: context,
@@ -2428,6 +2545,7 @@ class _HealthInfoPane extends StatelessWidget {
   const _HealthInfoPane({
     super.key,
     required this.busy,
+    required this.canEditRecords,
     required this.conditions,
     required this.medications,
     required this.onCreateCondition,
@@ -2439,6 +2557,7 @@ class _HealthInfoPane extends StatelessWidget {
   });
 
   final bool busy;
+  final bool canEditRecords;
   final List<JsonMap> conditions;
   final List<JsonMap> medications;
   final ConditionCreator onCreateCondition;
@@ -2481,7 +2600,7 @@ class _HealthInfoPane extends StatelessWidget {
           title: '건강 상태',
           trailing: TextButton.icon(
             key: const ValueKey('condition-create-open'),
-            onPressed: busy
+            onPressed: busy || !canEditRecords
                 ? null
                 : () => _showConditionEditor(context, null, onCreateCondition),
             icon: const Icon(Icons.add),
@@ -2494,7 +2613,7 @@ class _HealthInfoPane extends StatelessWidget {
                       .map(
                         (condition) => _ConditionTile(
                           condition: condition,
-                          onEdit: busy
+                          onEdit: busy || !canEditRecords
                               ? null
                               : () => _showConditionEditor(
                                   context,
@@ -2502,7 +2621,7 @@ class _HealthInfoPane extends StatelessWidget {
                                   onCreateCondition,
                                   onUpdate: onUpdateCondition,
                                 ),
-                          onDelete: busy
+                          onDelete: busy || !canEditRecords
                               ? null
                               : () => _confirmAndDelete(
                                   context: context,
@@ -2521,7 +2640,7 @@ class _HealthInfoPane extends StatelessWidget {
           title: '복약',
           trailing: TextButton.icon(
             key: const ValueKey('medication-create-open'),
-            onPressed: busy
+            onPressed: busy || !canEditRecords
                 ? null
                 : () =>
                       _showMedicationEditor(context, null, onCreateMedication),
@@ -2535,7 +2654,7 @@ class _HealthInfoPane extends StatelessWidget {
                       .map(
                         (medication) => _MedicationTile(
                           medication: medication,
-                          onEdit: busy
+                          onEdit: busy || !canEditRecords
                               ? null
                               : () => _showMedicationEditor(
                                   context,
@@ -2543,7 +2662,7 @@ class _HealthInfoPane extends StatelessWidget {
                                   onCreateMedication,
                                   onUpdate: onUpdateMedication,
                                 ),
-                          onDelete: busy
+                          onDelete: busy || !canEditRecords
                               ? null
                               : () => _confirmAndDelete(
                                   context: context,
@@ -4010,6 +4129,439 @@ Future<void> _confirmAndDelete({
   }
 }
 
+Future<void> _showFamilySharingDialog({
+  required BuildContext context,
+  required JsonMap dog,
+  required Future<JsonMap> Function() loadMe,
+  required DogMembersLoader loadMembers,
+  required DogMemberAdder addMember,
+  required DogMembershipUpdater updateMembership,
+  required DogMembershipRemover removeMembership,
+}) async {
+  final dogId = _asInt(dog['id']);
+  if (dogId == null) return;
+
+  final email = TextEditingController();
+  var newRole = 'viewer';
+  var busy = false;
+  String? errorText;
+
+  Future<JsonMap> loadState() async {
+    final results = await Future.wait<dynamic>([loadMe(), loadMembers(dogId)]);
+    return {
+      'me': results[0] as JsonMap,
+      'members': results[1] as List<JsonMap>,
+    };
+  }
+
+  var stateFuture = loadState();
+
+  try {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setState) {
+          Future<void> refresh() async {
+            setState(() {
+              errorText = null;
+              stateFuture = loadState();
+            });
+          }
+
+          Future<void> runMemberAction(Future<void> Function() action) async {
+            setState(() {
+              busy = true;
+              errorText = null;
+            });
+            try {
+              await action();
+              await refresh();
+            } on ApiException catch (error) {
+              setState(() => errorText = error.message);
+            } catch (error) {
+              setState(() => errorText = error.toString());
+            } finally {
+              setState(() => busy = false);
+            }
+          }
+
+          return AlertDialog(
+            title: const Text('가족 공유'),
+            content: SizedBox(
+              width: 560,
+              child: FutureBuilder<JsonMap>(
+                future: stateFuture,
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState != ConnectionState.done) {
+                    return const SizedBox(
+                      height: 180,
+                      child: Center(child: CircularProgressIndicator()),
+                    );
+                  }
+                  if (snapshot.hasError) {
+                    return Text(
+                      '가족 공유 정보를 불러오지 못했습니다: ${snapshot.error}',
+                      style: const TextStyle(color: _coral),
+                    );
+                  }
+
+                  final me = snapshot.data?['me'] as JsonMap? ?? {};
+                  final members =
+                      (snapshot.data?['members'] as List<JsonMap>? ?? []);
+                  final myId = _asInt(me['id']);
+                  final canManage = members.any((member) {
+                    final user = member['user'] as JsonMap?;
+                    return _asInt(user?['id']) == myId &&
+                        member['role'] == 'owner' &&
+                        member['status'] == 'active';
+                  });
+
+                  return SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                      Text(
+                        dog['name'] == null
+                            ? '함께 관리할 가족을 설정합니다.'
+                            : '${dog['name']}를 함께 관리할 가족을 설정합니다.',
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                      const SizedBox(height: 12),
+                      if (canManage) ...[
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                key: const ValueKey('member-email-input'),
+                                controller: email,
+                                enabled: !busy,
+                                decoration: const InputDecoration(
+                                  labelText: '가입된 가족 이메일',
+                                ),
+                                keyboardType: TextInputType.emailAddress,
+                                onChanged: (_) => setState(() {}),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            SizedBox(
+                              width: 130,
+                              child: DropdownButtonFormField<String>(
+                                key: const ValueKey('member-role-input'),
+                                initialValue: newRole,
+                                decoration: const InputDecoration(
+                                  labelText: '역할',
+                                ),
+                                items: _membershipRoleItems(),
+                                onChanged: busy
+                                    ? null
+                                    : (value) => setState(
+                                        () => newRole = value ?? newRole,
+                                      ),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: IconButton.filled(
+                                key: const ValueKey('member-add-button'),
+                                tooltip: '가족 추가',
+                                onPressed: busy || email.text.trim().isEmpty
+                                    ? null
+                                    : () => runMemberAction(() async {
+                                        await addMember(
+                                          dogId: dogId,
+                                          email: email.text.trim(),
+                                          role: newRole,
+                                        );
+                                        email.clear();
+                                      }),
+                                icon: const Icon(Icons.person_add_alt_1),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                      ] else
+                        const Text('공유 멤버 관리는 보호자 권한이 필요합니다.'),
+                      if (errorText != null) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          errorText!,
+                          style: const TextStyle(color: _coral),
+                        ),
+                      ],
+                      const SizedBox(height: 12),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxHeight: 360),
+                        child: ListView.separated(
+                          shrinkWrap: true,
+                          itemCount: members.length,
+                          separatorBuilder: (_, __) =>
+                              const Divider(height: 1),
+                          itemBuilder: (context, index) {
+                            final member = members[index];
+                            final user = member['user'] as JsonMap? ?? {};
+                            final membershipId = _asInt(member['id']);
+                            final isMe = _asInt(user['id']) == myId;
+                            final role = member['role'] as String? ?? 'viewer';
+                            final canEditThis =
+                                canManage &&
+                                membershipId != null &&
+                                !(isMe && role == 'owner');
+
+                            return ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: CircleAvatar(
+                                backgroundColor: _teal.withValues(alpha: 0.1),
+                                foregroundColor: _teal,
+                                child: const Icon(Icons.person_outline),
+                              ),
+                              title: Text(
+                                user['name'] as String? ??
+                                    user['email'] as String? ??
+                                    '가족',
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              subtitle: Text(
+                                [
+                                  if (user['email'] is String)
+                                    user['email'] as String,
+                                  if (isMe) '나',
+                                ].join(' · '),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              trailing: Wrap(
+                                spacing: 4,
+                                crossAxisAlignment: WrapCrossAlignment.center,
+                                children: [
+                                  SizedBox(
+                                    width: 112,
+                                    child: DropdownButtonHideUnderline(
+                                      child: DropdownButton<String>(
+                                        isExpanded: true,
+                                        value: role,
+                                        items: _membershipRoleItems(),
+                                        onChanged: canEditThis && !busy
+                                            ? (value) {
+                                                if (value == null ||
+                                                    value == role) {
+                                                  return;
+                                                }
+                                                runMemberAction(() async {
+                                                  await updateMembership(
+                                                    membershipId: membershipId!,
+                                                    role: value,
+                                                  );
+                                                });
+                                              }
+                                            : null,
+                                      ),
+                                    ),
+                                  ),
+                                  IconButton(
+                                    tooltip: '멤버 제거',
+                                    onPressed: canEditThis && !busy
+                                        ? () => runMemberAction(() async {
+                                            await removeMembership(
+                                              membershipId!,
+                                            );
+                                          })
+                                        : null,
+                                    icon: const Icon(Icons.person_remove_alt_1),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: busy ? null : () => Navigator.of(dialogContext).pop(),
+                child: const Text('닫기'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  } finally {
+    email.dispose();
+  }
+}
+
+Future<void> _showDogDeleteConfirmation({
+  required BuildContext context,
+  required JsonMap dog,
+  required DogDeletePreviewLoader loadPreview,
+  required DogDeleter onDelete,
+}) async {
+  final dogId = _asInt(dog['id']);
+  if (dogId == null) return;
+
+  final dogName = dog['name'] as String? ?? '반려견';
+  final confirmation = TextEditingController();
+  final previewFuture = loadPreview(dogId);
+
+  try {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: const Text('반려견 삭제'),
+          content: SizedBox(
+            width: 460,
+            child: FutureBuilder<JsonMap>(
+              future: previewFuture,
+              builder: (context, snapshot) {
+                final preview = snapshot.data;
+                final counts = preview?['counts'] as JsonMap?;
+                final attachmentBytes =
+                    _asNum(preview?['attachmentBytes']) ?? 0;
+                final canDelete =
+                    snapshot.hasData && confirmation.text.trim() == dogName;
+
+                return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '$dogName 프로필과 연결된 데이터를 모두 삭제합니다.',
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 10),
+                    const Text(
+                      '가족 공유가 추가되면 이 전체 삭제는 주 보호자만 실행할 수 있고, 가족 구성원은 별도의 공유 해제 기능을 사용하게 됩니다.',
+                    ),
+                    const SizedBox(height: 14),
+                    if (snapshot.connectionState != ConnectionState.done)
+                      const Center(child: CircularProgressIndicator())
+                    else if (snapshot.hasError)
+                      Text(
+                        '삭제 범위를 불러오지 못했습니다: ${snapshot.error}',
+                        style: const TextStyle(color: _coral),
+                      )
+                    else ...[
+                      _DeletePreviewRow(
+                        label: '일정',
+                        count: _asInt(counts?['schedules']) ?? 0,
+                      ),
+                      _DeletePreviewRow(
+                        label: '건강 상태',
+                        count: _asInt(counts?['conditions']) ?? 0,
+                      ),
+                      _DeletePreviewRow(
+                        label: '복약',
+                        count: _asInt(counts?['medications']) ?? 0,
+                      ),
+                      _DeletePreviewRow(
+                        label: '건강 기록',
+                        count: _asInt(counts?['healthLogs']) ?? 0,
+                      ),
+                      _DeletePreviewRow(
+                        label: '병원 방문',
+                        count: _asInt(counts?['medicalVisits']) ?? 0,
+                      ),
+                      _DeletePreviewRow(
+                        label: '지출',
+                        count: _asInt(counts?['expenses']) ?? 0,
+                      ),
+                      _DeletePreviewRow(
+                        label: '리포트',
+                        count: _asInt(counts?['visitReports']) ?? 0,
+                      ),
+                      _DeletePreviewRow(
+                        label: '첨부파일',
+                        count: _asInt(counts?['attachments']) ?? 0,
+                        suffix: attachmentBytes > 0
+                            ? ' · ${_formatBytes(attachmentBytes)}'
+                            : '',
+                      ),
+                    ],
+                    const SizedBox(height: 14),
+                    TextField(
+                      key: const ValueKey('dog-delete-confirm-name'),
+                      controller: confirmation,
+                      decoration: InputDecoration(
+                        labelText: '삭제 확인을 위해 "$dogName" 입력',
+                      ),
+                      onChanged: (_) => setState(() {}),
+                    ),
+                    const SizedBox(height: 8),
+                    FilledButton.icon(
+                      key: const ValueKey('dog-delete-confirm-button'),
+                      onPressed: canDelete
+                          ? () => Navigator.of(dialogContext).pop(true)
+                          : null,
+                      icon: const Icon(Icons.delete_outline),
+                      label: const Text('영구 삭제'),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('취소'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (confirmed == true) {
+      await onDelete(dogId);
+    }
+  } finally {
+    confirmation.dispose();
+  }
+}
+
+class _DeletePreviewRow extends StatelessWidget {
+  const _DeletePreviewRow({
+    required this.label,
+    required this.count,
+    this.suffix = '',
+  });
+
+  final String label;
+  final int count;
+  final String suffix;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Row(
+        children: [
+          Expanded(child: Text(label)),
+          Text(
+            '$count개$suffix',
+            style: const TextStyle(fontWeight: FontWeight.w700),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+List<DropdownMenuItem<String>> _membershipRoleItems() {
+  return const [
+    DropdownMenuItem(value: 'viewer', child: Text('보기')),
+    DropdownMenuItem(value: 'editor', child: Text('편집')),
+    DropdownMenuItem(value: 'owner', child: Text('보호자')),
+  ];
+}
+
 class _VisitReportHistoryTile extends StatelessWidget {
   const _VisitReportHistoryTile({required this.report});
 
@@ -4511,7 +5063,15 @@ class _HeroBand extends StatelessWidget {
     required this.dogName,
     required this.breed,
     required this.busy,
+    required this.canManageDog,
     required this.onEditDog,
+    required this.onLoadDeletePreview,
+    required this.onDeleteDog,
+    required this.onLoadMe,
+    required this.onLoadMembers,
+    required this.onAddMember,
+    required this.onUpdateMembership,
+    required this.onRemoveMembership,
     required this.onCreateReport,
   });
 
@@ -4519,7 +5079,15 @@ class _HeroBand extends StatelessWidget {
   final String dogName;
   final String breed;
   final bool busy;
+  final bool canManageDog;
   final DogUpdater onEditDog;
+  final DogDeletePreviewLoader onLoadDeletePreview;
+  final DogDeleter onDeleteDog;
+  final Future<JsonMap> Function() onLoadMe;
+  final DogMembersLoader onLoadMembers;
+  final DogMemberAdder onAddMember;
+  final DogMembershipUpdater onUpdateMembership;
+  final DogMembershipRemover onRemoveMembership;
   final VoidCallback? onCreateReport;
 
   @override
@@ -4561,8 +5129,8 @@ class _HeroBand extends StatelessWidget {
           children: [
             IconButton.filledTonal(
               key: const ValueKey('dog-profile-edit-open'),
-              tooltip: '프로필 수정',
-              onPressed: busy || dog == null
+              tooltip: canManageDog ? '프로필 수정' : '보호자만 수정 가능',
+              onPressed: busy || dog == null || !canManageDog
                   ? null
                   : () => _showDogProfileEditor(context, dog!, onEditDog),
               style: IconButton.styleFrom(
@@ -4571,6 +5139,45 @@ class _HeroBand extends StatelessWidget {
                 disabledForegroundColor: Colors.white38,
               ),
               icon: const Icon(Icons.edit_outlined),
+            ),
+            IconButton.filledTonal(
+              key: const ValueKey('family-sharing-open'),
+              tooltip: '가족 공유',
+              onPressed: busy || dog == null
+                  ? null
+                  : () => _showFamilySharingDialog(
+                    context: context,
+                    dog: dog!,
+                    loadMe: onLoadMe,
+                    loadMembers: onLoadMembers,
+                    addMember: onAddMember,
+                    updateMembership: onUpdateMembership,
+                    removeMembership: onRemoveMembership,
+                  ),
+              style: IconButton.styleFrom(
+                backgroundColor: Colors.white.withValues(alpha: 0.12),
+                foregroundColor: Colors.white,
+                disabledForegroundColor: Colors.white38,
+              ),
+              icon: const Icon(Icons.group_outlined),
+            ),
+            IconButton.filledTonal(
+              key: const ValueKey('dog-delete-open'),
+              tooltip: canManageDog ? '반려견 삭제' : '보호자만 삭제 가능',
+              onPressed: busy || dog == null || !canManageDog
+                  ? null
+                  : () => _showDogDeleteConfirmation(
+                    context: context,
+                    dog: dog!,
+                    loadPreview: onLoadDeletePreview,
+                    onDelete: onDeleteDog,
+                  ),
+              style: IconButton.styleFrom(
+                backgroundColor: Colors.white.withValues(alpha: 0.12),
+                foregroundColor: Colors.white,
+                disabledForegroundColor: Colors.white38,
+              ),
+              icon: const Icon(Icons.delete_outline),
             ),
             FilledButton.icon(
               style: FilledButton.styleFrom(
@@ -5511,6 +6118,14 @@ num? _asNum(Object? value) {
   if (value is num) return value;
   if (value is String) return num.tryParse(value);
   return null;
+}
+
+String _formatBytes(num bytes) {
+  if (bytes < 1024) return '${bytes.round()} B';
+  final kb = bytes / 1024;
+  if (kb < 1024) return '${kb.toStringAsFixed(1)} KB';
+  final mb = kb / 1024;
+  return '${mb.toStringAsFixed(1)} MB';
 }
 
 String _won(Object? value) {

@@ -78,6 +78,46 @@ class ApiClient {
     return _request<JsonMap>('PATCH', '/dogs/$dogId', body: payload);
   }
 
+  Future<JsonMap> dogDeletePreview(int dogId) {
+    return _request<JsonMap>('GET', '/dogs/$dogId/delete-preview');
+  }
+
+  Future<JsonMap> deleteDog(int dogId) {
+    return _request<JsonMap>('DELETE', '/dogs/$dogId');
+  }
+
+  Future<List<JsonMap>> dogMembers(int dogId) async {
+    final data = await _request<List<dynamic>>('GET', '/dogs/$dogId/members');
+    return data.cast<JsonMap>();
+  }
+
+  Future<JsonMap> addDogMember({
+    required int dogId,
+    required String email,
+    required String role,
+  }) {
+    return _request<JsonMap>(
+      'POST',
+      '/dogs/$dogId/members',
+      body: {'email': email, 'role': role},
+    );
+  }
+
+  Future<JsonMap> updateDogMembership({
+    required int membershipId,
+    required String role,
+  }) {
+    return _request<JsonMap>(
+      'PATCH',
+      '/dog-memberships/$membershipId',
+      body: {'role': role},
+    );
+  }
+
+  Future<JsonMap> removeDogMembership(int membershipId) {
+    return _request<JsonMap>('DELETE', '/dog-memberships/$membershipId');
+  }
+
   Future<JsonMap> dashboard(int dogId) {
     return _request<JsonMap>('GET', '/dogs/$dogId/dashboard');
   }

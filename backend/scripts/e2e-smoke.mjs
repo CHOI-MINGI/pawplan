@@ -4,6 +4,7 @@ const apiBaseUrl = (
 const rootUrl = apiBaseUrl.replace(/\/api\/v1$/, "");
 const keepData = process.env.SMOKE_KEEP_DATA === "1";
 let smokeEmail;
+let smokeMemberEmail;
 
 function assert(condition, message) {
   if (!condition) {
@@ -27,6 +28,30 @@ async function request(method, path, { token, body } = {}) {
     throw new Error(`${method} ${path} failed: ${response.status} ${text}`);
   }
   return decoded.data;
+}
+
+async function expectRequestFailure(
+  method,
+  path,
+  { token, body, status } = {},
+) {
+  const response = await fetch(`${apiBaseUrl}${path}`, {
+    method,
+    headers: {
+      Accept: "application/json",
+      ...(body ? { "Content-Type": "application/json" } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await response.text();
+  const decoded = text ? JSON.parse(text) : {};
+  if (response.status !== status || decoded.success !== false) {
+    throw new Error(
+      `${method} ${path} expected ${status} failure, got ${response.status} ${text}`,
+    );
+  }
+  return decoded.error;
 }
 
 async function uploadAttachment(
@@ -121,10 +146,120 @@ async function main() {
   const dogId = onboarding.dogId;
   assert(Number.isInteger(dogId), "missing dog id");
 
+  const memberEmail = `member-${suffix}@pawplan.local`;
+  smokeMemberEmail = memberEmail;
+  await request("POST", "/auth/register", {
+    body: { email: memberEmail, password, name: "shared member" },
+  });
+  const memberLogin = await request("POST", "/auth/login", {
+    body: { email: memberEmail, password },
+  });
+  const memberToken = memberLogin.accessToken;
+  const membership = await request("POST", `/dogs/${dogId}/members`, {
+    token,
+    body: { email: memberEmail, role: "viewer" },
+  });
+  assert(
+    membership.role === "viewer" && membership.user?.email === memberEmail,
+    "dog member add failed",
+  );
+  const members = await request("GET", `/dogs/${dogId}/members`, { token });
+  assert(
+    members.some((item) => item.id === membership.id),
+    "dog member not listed",
+  );
+  const memberDogs = await request("GET", "/dogs", { token: memberToken });
+  assert(
+    memberDogs.some((dog) => dog.id === dogId),
+    "shared dog not listed for member",
+  );
+  const memberDashboard = await request("GET", `/dogs/${dogId}/dashboard`, {
+    token: memberToken,
+  });
+  assert(memberDashboard.dog.id === dogId, "shared dog dashboard denied");
+  assert(
+    memberDashboard.access?.role === "viewer" &&
+      memberDashboard.access?.canManage === false,
+    "shared dog access role mismatch",
+  );
+  await expectRequestFailure("PATCH", `/dogs/${dogId}`, {
+    token: memberToken,
+    status: 404,
+    body: { notes: "viewer cannot update dog profile" },
+  });
+  await expectRequestFailure("POST", `/dogs/${dogId}/health-logs`, {
+    token: memberToken,
+    status: 404,
+    body: {
+      logType: "symptom",
+      title: "viewer write should fail",
+    },
+  });
+  const editorMembership = await request(
+    "PATCH",
+    `/dog-memberships/${membership.id}`,
+    {
+      token,
+      body: { role: "editor" },
+    },
+  );
+  assert(editorMembership.role === "editor", "membership role update failed");
+  const editorHealthLog = await request("POST", `/dogs/${dogId}/health-logs`, {
+    token: memberToken,
+    body: {
+      logType: "symptom",
+      title: "editor shared write",
+    },
+  });
+  assert(
+    Number.isInteger(editorHealthLog.id),
+    "editor shared health log create failed",
+  );
+  await request("DELETE", `/health-logs/${editorHealthLog.id}`, { token });
+  await request("DELETE", `/dog-memberships/${membership.id}`, { token });
+  const memberDogsAfterRemove = await request("GET", "/dogs", {
+    token: memberToken,
+  });
+  assert(
+    !memberDogsAfterRemove.some((dog) => dog.id === dogId),
+    "removed member can still list shared dog",
+  );
+
   const dogs = await request("GET", "/dogs", { token });
   assert(
     dogs.some((dog) => dog.id === dogId),
     "created dog not listed",
+  );
+
+  const dogToDelete = await request("POST", "/dogs", {
+    token,
+    body: {
+      name: "delete-scope-dog",
+      breed: "Mixed",
+      sex: "male",
+      neutered: false,
+    },
+  });
+  const deletePreview = await request(
+    "GET",
+    `/dogs/${dogToDelete.id}/delete-preview`,
+    { token },
+  );
+  assert(
+    deletePreview.dog?.id === dogToDelete.id &&
+      deletePreview.scope === "pet" &&
+      deletePreview.accessPolicy === "primary_owner_only",
+    "dog delete preview policy mismatch",
+  );
+  await request("DELETE", `/dogs/${dogToDelete.id}`, { token });
+  const dogsAfterDelete = await request("GET", "/dogs", { token });
+  assert(
+    !dogsAfterDelete.some((dog) => dog.id === dogToDelete.id),
+    "deleted dog still listed",
+  );
+  assert(
+    dogsAfterDelete.some((dog) => dog.id === dogId),
+    "dog delete removed another dog",
   );
 
   const schedules = await request(
@@ -499,6 +634,8 @@ async function main() {
         checked: [
           "auth",
           "onboarding",
+          "family sharing viewer/editor permissions",
+          "dog delete preview/scope",
           "care schedule complete",
           "recurring care schedule continue",
           "condition create/update/delete",
@@ -528,9 +665,13 @@ async function cleanup() {
       where: { email: smokeEmail },
       select: { id: true },
     });
-    if (!user) return;
-    await prisma.dog.deleteMany({ where: { primaryOwnerId: user.id } });
-    await prisma.user.delete({ where: { id: user.id } });
+    if (user) {
+      await prisma.dog.deleteMany({ where: { primaryOwnerId: user.id } });
+      await prisma.user.delete({ where: { id: user.id } });
+    }
+    if (smokeMemberEmail) {
+      await prisma.user.deleteMany({ where: { email: smokeMemberEmail } });
+    }
   } finally {
     await prisma.$disconnect();
   }

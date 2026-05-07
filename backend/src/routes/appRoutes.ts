@@ -58,11 +58,94 @@ function userId(req: AuthedRequest) {
 }
 
 async function requireDogAccess(ownerId: bigint, dogId: bigint) {
-  const dog = await prisma.dog.findUnique({ where: { id: dogId } });
-  if (!dog || dog.primaryOwnerId !== ownerId) {
+  const dog = await prisma.dog.findFirst({
+    where: {
+      id: dogId,
+      OR: [
+        { primaryOwnerId: ownerId },
+        { memberships: { some: { userId: ownerId, status: "active" } } },
+      ],
+    },
+  });
+  if (!dog) {
     throw new HttpError(404, "NOT_FOUND", "dog not found");
   }
   return dog;
+}
+
+async function requireDogOwnerAccess(ownerId: bigint, dogId: bigint) {
+  const dog = await prisma.dog.findFirst({
+    where: {
+      id: dogId,
+      OR: [
+        { primaryOwnerId: ownerId },
+        {
+          memberships: {
+            some: { userId: ownerId, role: "owner", status: "active" },
+          },
+        },
+      ],
+    },
+  });
+  if (!dog) {
+    throw new HttpError(404, "NOT_FOUND", "dog not found");
+  }
+  return dog;
+}
+
+async function requireDogWriteAccess(userId: bigint, dogId: bigint) {
+  const dog = await prisma.dog.findFirst({
+    where: {
+      id: dogId,
+      OR: [
+        { primaryOwnerId: userId },
+        {
+          memberships: {
+            some: {
+              userId,
+              status: "active",
+              role: { in: ["owner", "editor"] },
+            },
+          },
+        },
+      ],
+    },
+  });
+  if (!dog) {
+    throw new HttpError(404, "NOT_FOUND", "dog not found");
+  }
+  return dog;
+}
+
+async function dogAccessRole(userId: bigint, dog: { id: bigint; primaryOwnerId: bigint }) {
+  if (dog.primaryOwnerId === userId) return "owner";
+  const membership = await prisma.dogMembership.findFirst({
+    where: { dogId: dog.id, userId, status: "active" },
+    select: { role: true },
+  });
+  return membership?.role ?? null;
+}
+
+function normalizeMembershipRole(value: unknown) {
+  if (value === "owner" || value === "editor" || value === "viewer") {
+    return value;
+  }
+  throw new HttpError(
+    400,
+    "VALIDATION_ERROR",
+    "role must be owner, editor, or viewer",
+  );
+}
+
+async function requireMembershipOwnerAccess(ownerId: bigint, membershipId: bigint) {
+  const membership = await prisma.dogMembership.findUnique({
+    where: { id: membershipId },
+  });
+  if (!membership) {
+    throw new HttpError(404, "NOT_FOUND", "membership not found");
+  }
+  await requireDogOwnerAccess(ownerId, membership.dogId);
+  return membership;
 }
 
 async function requireScheduleAccess(ownerId: bigint, scheduleId: bigint) {
@@ -71,6 +154,15 @@ async function requireScheduleAccess(ownerId: bigint, scheduleId: bigint) {
   });
   if (!schedule) throw new HttpError(404, "NOT_FOUND", "schedule not found");
   await requireDogAccess(ownerId, schedule.dogId);
+  return schedule;
+}
+
+async function requireScheduleWriteAccess(ownerId: bigint, scheduleId: bigint) {
+  const schedule = await prisma.careSchedule.findUnique({
+    where: { id: scheduleId },
+  });
+  if (!schedule) throw new HttpError(404, "NOT_FOUND", "schedule not found");
+  await requireDogWriteAccess(ownerId, schedule.dogId);
   return schedule;
 }
 
@@ -83,6 +175,15 @@ async function requireConditionAccess(ownerId: bigint, conditionId: bigint) {
   return condition;
 }
 
+async function requireConditionWriteAccess(ownerId: bigint, conditionId: bigint) {
+  const condition = await prisma.dogCondition.findUnique({
+    where: { id: conditionId },
+  });
+  if (!condition) throw new HttpError(404, "NOT_FOUND", "condition not found");
+  await requireDogWriteAccess(ownerId, condition.dogId);
+  return condition;
+}
+
 async function requireMedicationAccess(ownerId: bigint, medicationId: bigint) {
   const medication = await prisma.dogMedication.findUnique({
     where: { id: medicationId },
@@ -90,6 +191,16 @@ async function requireMedicationAccess(ownerId: bigint, medicationId: bigint) {
   if (!medication)
     throw new HttpError(404, "NOT_FOUND", "medication not found");
   await requireDogAccess(ownerId, medication.dogId);
+  return medication;
+}
+
+async function requireMedicationWriteAccess(ownerId: bigint, medicationId: bigint) {
+  const medication = await prisma.dogMedication.findUnique({
+    where: { id: medicationId },
+  });
+  if (!medication)
+    throw new HttpError(404, "NOT_FOUND", "medication not found");
+  await requireDogWriteAccess(ownerId, medication.dogId);
   return medication;
 }
 
@@ -158,12 +269,28 @@ async function requireHealthLogAccess(ownerId: bigint, logId: bigint) {
   return log;
 }
 
+async function requireHealthLogWriteAccess(ownerId: bigint, logId: bigint) {
+  const log = await prisma.healthLog.findUnique({ where: { id: logId } });
+  if (!log) throw new HttpError(404, "NOT_FOUND", "health log not found");
+  await requireDogWriteAccess(ownerId, log.dogId);
+  return log;
+}
+
 async function requireMedicalVisitAccess(ownerId: bigint, visitId: bigint) {
   const visit = await prisma.medicalVisit.findUnique({
     where: { id: visitId },
   });
   if (!visit) throw new HttpError(404, "NOT_FOUND", "medical visit not found");
   await requireDogAccess(ownerId, visit.dogId);
+  return visit;
+}
+
+async function requireMedicalVisitWriteAccess(ownerId: bigint, visitId: bigint) {
+  const visit = await prisma.medicalVisit.findUnique({
+    where: { id: visitId },
+  });
+  if (!visit) throw new HttpError(404, "NOT_FOUND", "medical visit not found");
+  await requireDogWriteAccess(ownerId, visit.dogId);
   return visit;
 }
 
@@ -178,10 +305,28 @@ async function requireAttachmentAccess(ownerId: bigint, attachmentId: bigint) {
   return attachment;
 }
 
+async function requireAttachmentWriteAccess(ownerId: bigint, attachmentId: bigint) {
+  const attachment = await prisma.medicalVisitAttachment.findUnique({
+    where: { id: attachmentId },
+    include: { medicalVisit: { select: { dogId: true } } },
+  });
+  if (!attachment)
+    throw new HttpError(404, "NOT_FOUND", "attachment not found");
+  await requireDogWriteAccess(ownerId, attachment.medicalVisit.dogId);
+  return attachment;
+}
+
 async function requireExpenseAccess(ownerId: bigint, expenseId: bigint) {
   const expense = await prisma.expense.findUnique({ where: { id: expenseId } });
   if (!expense) throw new HttpError(404, "NOT_FOUND", "expense not found");
   await requireDogAccess(ownerId, expense.dogId);
+  return expense;
+}
+
+async function requireExpenseWriteAccess(ownerId: bigint, expenseId: bigint) {
+  const expense = await prisma.expense.findUnique({ where: { id: expenseId } });
+  if (!expense) throw new HttpError(404, "NOT_FOUND", "expense not found");
+  await requireDogWriteAccess(ownerId, expense.dogId);
   return expense;
 }
 
@@ -242,6 +387,16 @@ appRoutes.post(
               : "none",
           notes:
             typeof dogInput.notes === "string" ? dogInput.notes : undefined,
+        },
+      });
+      await tx.dogMembership.create({
+        data: {
+          dogId: dog.id,
+          userId: ownerId,
+          role: "owner",
+          status: "active",
+          invitedBy: ownerId,
+          joinedAt: new Date(),
         },
       });
 
@@ -337,27 +492,41 @@ appRoutes.post(
   "/dogs",
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
-    const dog = await prisma.dog.create({
-      data: {
-        primaryOwnerId: ownerId,
-        name: requireString(req.body.name, "name"),
-        breed: requireString(req.body.breed, "breed"),
-        birthDate: optionalDate(req.body.birthDate),
-        sex: requireString(req.body.sex, "sex"),
-        neutered: Boolean(req.body.neutered),
-        currentWeightKg: optionalNumber(req.body.currentWeightKg),
-        targetWeightKg: optionalNumber(req.body.targetWeightKg),
-        activityLevel:
-          typeof req.body.activityLevel === "string"
-            ? req.body.activityLevel
-            : "medium",
-        insuranceStatus:
-          typeof req.body.insuranceStatus === "string"
-            ? req.body.insuranceStatus
-            : "none",
-        notes: typeof req.body.notes === "string" ? req.body.notes : undefined,
-      },
-      select: { id: true, name: true },
+    const dog = await prisma.$transaction(async (tx) => {
+      const created = await tx.dog.create({
+        data: {
+          primaryOwnerId: ownerId,
+          name: requireString(req.body.name, "name"),
+          breed: requireString(req.body.breed, "breed"),
+          birthDate: optionalDate(req.body.birthDate),
+          sex: requireString(req.body.sex, "sex"),
+          neutered: Boolean(req.body.neutered),
+          currentWeightKg: optionalNumber(req.body.currentWeightKg),
+          targetWeightKg: optionalNumber(req.body.targetWeightKg),
+          activityLevel:
+            typeof req.body.activityLevel === "string"
+              ? req.body.activityLevel
+              : "medium",
+          insuranceStatus:
+            typeof req.body.insuranceStatus === "string"
+              ? req.body.insuranceStatus
+              : "none",
+          notes:
+            typeof req.body.notes === "string" ? req.body.notes : undefined,
+        },
+        select: { id: true, name: true },
+      });
+      await tx.dogMembership.create({
+        data: {
+          dogId: created.id,
+          userId: ownerId,
+          role: "owner",
+          status: "active",
+          invitedBy: ownerId,
+          joinedAt: new Date(),
+        },
+      });
+      return created;
     });
     ok(res, dog, 201);
   }),
@@ -366,8 +535,18 @@ appRoutes.post(
 appRoutes.get(
   "/dogs",
   asyncHandler(async (req, res) => {
+    const requesterId = userId(req as AuthedRequest);
     const dogs = await prisma.dog.findMany({
-      where: { primaryOwnerId: userId(req as AuthedRequest) },
+      where: {
+        OR: [
+          { primaryOwnerId: requesterId },
+          {
+            memberships: {
+              some: { userId: requesterId, status: "active" },
+            },
+          },
+        ],
+      },
       orderBy: { createdAt: "desc" },
     });
     ok(res, dogs);
@@ -392,7 +571,7 @@ appRoutes.patch(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
-    await requireDogAccess(ownerId, dogId);
+    await requireDogOwnerAccess(ownerId, dogId);
     const dog = await prisma.dog.update({
       where: { id: dogId },
       data: {
@@ -423,11 +602,246 @@ appRoutes.patch(
 );
 
 appRoutes.get(
+  "/dogs/:dogId/delete-preview",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const dogId = parseId(req.params.dogId, "dogId");
+    const dog = await requireDogOwnerAccess(ownerId, dogId);
+
+    const [
+      schedules,
+      conditions,
+      medications,
+      healthLogs,
+      medicalVisits,
+      expenses,
+      forecasts,
+      visitReports,
+      attachments,
+    ] = await Promise.all([
+      prisma.careSchedule.count({ where: { dogId } }),
+      prisma.dogCondition.count({ where: { dogId } }),
+      prisma.dogMedication.count({ where: { dogId } }),
+      prisma.healthLog.count({ where: { dogId } }),
+      prisma.medicalVisit.count({ where: { dogId } }),
+      prisma.expense.count({ where: { dogId } }),
+      prisma.costForecast.count({ where: { dogId } }),
+      prisma.visitReport.count({ where: { dogId } }),
+      prisma.medicalVisitAttachment.aggregate({
+        where: { medicalVisit: { dogId } },
+        _count: { _all: true },
+        _sum: { fileSizeBytes: true },
+      }),
+    ]);
+
+    ok(res, {
+      dog: { id: dog.id, name: dog.name },
+      scope: "pet",
+      accessPolicy: "primary_owner_only",
+      counts: {
+        schedules,
+        conditions,
+        medications,
+        healthLogs,
+        medicalVisits,
+        expenses,
+        forecasts,
+        visitReports,
+        attachments: attachments._count._all,
+      },
+      attachmentBytes: attachments._sum.fileSizeBytes ?? 0,
+    });
+  }),
+);
+
+appRoutes.delete(
+  "/dogs/:dogId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const dogId = parseId(req.params.dogId, "dogId");
+    await requireDogOwnerAccess(ownerId, dogId);
+
+    const attachments = await prisma.medicalVisitAttachment.findMany({
+      where: { medicalVisit: { dogId } },
+      select: { fileUrl: true },
+    });
+
+    await prisma.dog.delete({ where: { id: dogId } });
+    await Promise.all(
+      attachments.map((attachment) => deleteAttachmentFile(attachment.fileUrl)),
+    );
+
+    ok(res, {
+      deleted: true,
+      scope: "pet",
+      accessPolicy: "primary_owner_only",
+    });
+  }),
+);
+
+appRoutes.get(
+  "/dogs/:dogId/members",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const dogId = parseId(req.params.dogId, "dogId");
+    await requireDogAccess(ownerId, dogId);
+
+    const memberships = await prisma.dogMembership.findMany({
+      where: { dogId, status: "active" },
+      orderBy: [{ role: "asc" }, { createdAt: "asc" }],
+      include: {
+        user: { select: { id: true, email: true, name: true } },
+      },
+    });
+
+    ok(
+      res,
+      memberships.map((membership) => ({
+        id: membership.id,
+        dogId: membership.dogId,
+        userId: membership.userId,
+        role: membership.role,
+        status: membership.status,
+        joinedAt: membership.joinedAt,
+        createdAt: membership.createdAt,
+        user: membership.user,
+      })),
+    );
+  }),
+);
+
+appRoutes.post(
+  "/dogs/:dogId/members",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const dogId = parseId(req.params.dogId, "dogId");
+    await requireDogOwnerAccess(ownerId, dogId);
+
+    const email = requireString(req.body.email, "email").toLowerCase();
+    const role = normalizeMembershipRole(req.body.role ?? "viewer");
+    const member = await prisma.user.findUnique({
+      where: { email },
+      select: { id: true, email: true, name: true },
+    });
+    if (!member) {
+      throw new HttpError(404, "NOT_FOUND", "user not found");
+    }
+
+    const membership = await prisma.dogMembership.upsert({
+      where: { dogId_userId: { dogId, userId: member.id } },
+      create: {
+        dogId,
+        userId: member.id,
+        role,
+        status: "active",
+        invitedBy: ownerId,
+        joinedAt: new Date(),
+      },
+      update: {
+        role,
+        status: "active",
+        invitedBy: ownerId,
+        joinedAt: new Date(),
+      },
+      include: {
+        user: { select: { id: true, email: true, name: true } },
+      },
+    });
+
+    ok(
+      res,
+      {
+        id: membership.id,
+        dogId: membership.dogId,
+        userId: membership.userId,
+        role: membership.role,
+        status: membership.status,
+        joinedAt: membership.joinedAt,
+        user: membership.user,
+      },
+      201,
+    );
+  }),
+);
+
+appRoutes.patch(
+  "/dog-memberships/:membershipId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const membershipId = parseId(req.params.membershipId, "membershipId");
+    const existing = await requireMembershipOwnerAccess(ownerId, membershipId);
+    const role =
+      req.body.role === undefined ? existing.role : normalizeMembershipRole(req.body.role);
+    const status =
+      typeof req.body.status === "string" ? req.body.status : existing.status;
+
+    if (status !== "active" && status !== "removed") {
+      throw new HttpError(
+        400,
+        "VALIDATION_ERROR",
+        "status must be active or removed",
+      );
+    }
+
+    if (existing.userId === ownerId && (role !== "owner" || status !== "active")) {
+      throw new HttpError(
+        400,
+        "VALIDATION_ERROR",
+        "cannot demote or remove your own owner membership",
+      );
+    }
+
+    const membership = await prisma.dogMembership.update({
+      where: { id: membershipId },
+      data: { role, status },
+      include: {
+        user: { select: { id: true, email: true, name: true } },
+      },
+    });
+
+    ok(res, {
+      id: membership.id,
+      dogId: membership.dogId,
+      userId: membership.userId,
+      role: membership.role,
+      status: membership.status,
+      joinedAt: membership.joinedAt,
+      user: membership.user,
+    });
+  }),
+);
+
+appRoutes.delete(
+  "/dog-memberships/:membershipId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const membershipId = parseId(req.params.membershipId, "membershipId");
+    const existing = await requireMembershipOwnerAccess(ownerId, membershipId);
+
+    if (existing.userId === ownerId) {
+      throw new HttpError(
+        400,
+        "VALIDATION_ERROR",
+        "cannot remove your own owner membership",
+      );
+    }
+
+    await prisma.dogMembership.update({
+      where: { id: membershipId },
+      data: { status: "removed" },
+    });
+
+    ok(res, { removed: true });
+  }),
+);
+
+appRoutes.get(
   "/dogs/:dogId/dashboard",
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
     const dog = await requireDogAccess(ownerId, dogId);
+    const role = await dogAccessRole(ownerId, dog);
     const today = new Date();
     const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
     const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
@@ -495,6 +909,10 @@ appRoutes.get(
             yearlyEstimate: forecasts.basic.yearlyEstimate,
           }
         : null,
+      access: {
+        role,
+        canManage: role === "owner",
+      },
     });
   }),
 );
@@ -522,7 +940,7 @@ appRoutes.post(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
-    await requireDogAccess(ownerId, dogId);
+    await requireDogWriteAccess(ownerId, dogId);
     const condition = await prisma.dogCondition.create({
       data: {
         dogId,
@@ -546,7 +964,7 @@ appRoutes.patch(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const conditionId = parseId(req.params.conditionId, "conditionId");
-    const existing = await requireConditionAccess(ownerId, conditionId);
+    const existing = await requireConditionWriteAccess(ownerId, conditionId);
     const condition = await prisma.dogCondition.update({
       where: { id: conditionId },
       data: {
@@ -576,7 +994,7 @@ appRoutes.delete(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const conditionId = parseId(req.params.conditionId, "conditionId");
-    const existing = await requireConditionAccess(ownerId, conditionId);
+    const existing = await requireConditionWriteAccess(ownerId, conditionId);
     await prisma.dogCondition.delete({ where: { id: conditionId } });
     await recalculateCostForecasts(prisma, existing.dogId);
     ok(res, { deleted: true });
@@ -603,7 +1021,7 @@ appRoutes.post(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
-    await requireDogAccess(ownerId, dogId);
+    await requireDogWriteAccess(ownerId, dogId);
     const medication = await prisma.dogMedication.create({
       data: {
         dogId,
@@ -637,7 +1055,7 @@ appRoutes.patch(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const medicationId = parseId(req.params.medicationId, "medicationId");
-    const existing = await requireMedicationAccess(ownerId, medicationId);
+    const existing = await requireMedicationWriteAccess(ownerId, medicationId);
     const medication = await prisma.dogMedication.update({
       where: { id: medicationId },
       data: {
@@ -674,7 +1092,7 @@ appRoutes.delete(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const medicationId = parseId(req.params.medicationId, "medicationId");
-    const existing = await requireMedicationAccess(ownerId, medicationId);
+    const existing = await requireMedicationWriteAccess(ownerId, medicationId);
     await prisma.dogMedication.delete({ where: { id: medicationId } });
     await recalculateCostForecasts(prisma, existing.dogId);
     ok(res, { deleted: true });
@@ -686,7 +1104,7 @@ appRoutes.post(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
-    await requireDogAccess(ownerId, dogId);
+    await requireDogWriteAccess(ownerId, dogId);
     const generatedCount = await generateDefaultCareSchedules(
       prisma,
       dogId,
@@ -730,7 +1148,7 @@ appRoutes.post(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
-    await requireDogAccess(ownerId, dogId);
+    await requireDogWriteAccess(ownerId, dogId);
     const schedule = await prisma.careSchedule.create({
       data: {
         dogId,
@@ -776,7 +1194,7 @@ appRoutes.patch(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const scheduleId = parseId(req.params.scheduleId, "scheduleId");
-    await requireScheduleAccess(ownerId, scheduleId);
+    await requireScheduleWriteAccess(ownerId, scheduleId);
     const schedule = await prisma.careSchedule.update({
       where: { id: scheduleId },
       data: {
@@ -803,7 +1221,7 @@ appRoutes.post(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const scheduleId = parseId(req.params.scheduleId, "scheduleId");
-    const existing = await requireScheduleAccess(ownerId, scheduleId);
+    const existing = await requireScheduleWriteAccess(ownerId, scheduleId);
     if (existing.status !== "pending") {
       ok(res, existing);
       return;
@@ -825,7 +1243,7 @@ appRoutes.post(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const scheduleId = parseId(req.params.scheduleId, "scheduleId");
-    const existing = await requireScheduleAccess(ownerId, scheduleId);
+    const existing = await requireScheduleWriteAccess(ownerId, scheduleId);
     if (existing.status !== "pending") {
       ok(res, existing);
       return;
@@ -965,7 +1383,7 @@ appRoutes.post(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
-    await requireDogAccess(ownerId, dogId);
+    await requireDogWriteAccess(ownerId, dogId);
     const log = await prisma.healthLog.create({
       data: {
         dogId,
@@ -1005,7 +1423,7 @@ appRoutes.patch(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const logId = parseId(req.params.logId, "logId");
-    await requireHealthLogAccess(ownerId, logId);
+    await requireHealthLogWriteAccess(ownerId, logId);
     ok(
       res,
       await prisma.healthLog.update({
@@ -1035,7 +1453,7 @@ appRoutes.delete(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const logId = parseId(req.params.logId, "logId");
-    await requireHealthLogAccess(ownerId, logId);
+    await requireHealthLogWriteAccess(ownerId, logId);
     await prisma.healthLog.delete({ where: { id: logId } });
     ok(res, { deleted: true });
   }),
@@ -1067,7 +1485,7 @@ appRoutes.post(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
-    await requireDogAccess(ownerId, dogId);
+    await requireDogWriteAccess(ownerId, dogId);
     const result = await prisma.$transaction(async (tx) => {
       const visit = await tx.medicalVisit.create({
         data: {
@@ -1170,7 +1588,7 @@ appRoutes.post(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const visitId = parseId(req.params.visitId, "visitId");
-    await requireMedicalVisitAccess(ownerId, visitId);
+    await requireMedicalVisitWriteAccess(ownerId, visitId);
 
     if (!req.file) {
       throw new HttpError(400, "VALIDATION_ERROR", "file is required");
@@ -1214,7 +1632,7 @@ appRoutes.delete(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const attachmentId = parseId(req.params.attachmentId, "attachmentId");
-    const attachment = await requireAttachmentAccess(ownerId, attachmentId);
+    const attachment = await requireAttachmentWriteAccess(ownerId, attachmentId);
     await prisma.medicalVisitAttachment.delete({
       where: { id: attachmentId },
     });
@@ -1228,7 +1646,7 @@ appRoutes.patch(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const visitId = parseId(req.params.visitId, "visitId");
-    await requireMedicalVisitAccess(ownerId, visitId);
+    await requireMedicalVisitWriteAccess(ownerId, visitId);
     ok(
       res,
       await prisma.medicalVisit.update({
@@ -1277,7 +1695,7 @@ appRoutes.delete(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const visitId = parseId(req.params.visitId, "visitId");
-    const existing = await requireMedicalVisitAccess(ownerId, visitId);
+    const existing = await requireMedicalVisitWriteAccess(ownerId, visitId);
     const attachments = await prisma.medicalVisitAttachment.findMany({
       where: { medicalVisitId: visitId },
     });
@@ -1334,7 +1752,7 @@ appRoutes.post(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
-    await requireDogAccess(ownerId, dogId);
+    await requireDogWriteAccess(ownerId, dogId);
     const expense = await prisma.expense.create({
       data: {
         dogId,
@@ -1411,7 +1829,7 @@ appRoutes.patch(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const expenseId = parseId(req.params.expenseId, "expenseId");
-    const existing = await requireExpenseAccess(ownerId, expenseId);
+    const existing = await requireExpenseWriteAccess(ownerId, expenseId);
     const expense = await prisma.expense.update({
       where: { id: expenseId },
       data: {
@@ -1439,7 +1857,7 @@ appRoutes.delete(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const expenseId = parseId(req.params.expenseId, "expenseId");
-    const existing = await requireExpenseAccess(ownerId, expenseId);
+    const existing = await requireExpenseWriteAccess(ownerId, expenseId);
     await prisma.expense.delete({ where: { id: expenseId } });
     await recalculateCostForecasts(prisma, existing.dogId);
     ok(res, { deleted: true });
@@ -1467,7 +1885,7 @@ appRoutes.post(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
-    await requireDogAccess(ownerId, dogId);
+    await requireDogWriteAccess(ownerId, dogId);
     const generatedCount = await recalculateCostForecasts(prisma, dogId);
     ok(res, { generatedCount }, 201);
   }),
@@ -1498,7 +1916,7 @@ appRoutes.post(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
-    await requireDogAccess(ownerId, dogId);
+    await requireDogWriteAccess(ownerId, dogId);
     const report = await buildVisitReport(prisma, dogId, ownerId);
     ok(res, { id: report.id, title: report.title }, 201);
   }),

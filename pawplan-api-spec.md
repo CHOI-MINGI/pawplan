@@ -355,6 +355,122 @@ Request:
 
 - 반려견 수정 시 서버는 관련 비용 예측을 자동으로 재계산해야 한다.
 
+## 5.6 반려견 삭제 영향도 확인
+
+`GET /dogs/{dogId}/delete-preview`
+
+삭제 전 사용자에게 보여줄 영향도 정보를 반환한다. 현재 MVP에서는 주 보호자 소유 펫 전체 삭제만 지원하므로 `scope`는 `pet`, `accessPolicy`는 `primary_owner_only`로 고정한다.
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "dog": {
+      "id": 1,
+      "name": "콩이"
+    },
+    "scope": "pet",
+    "accessPolicy": "primary_owner_only",
+    "counts": {
+      "schedules": 12,
+      "conditions": 2,
+      "medications": 1,
+      "healthLogs": 34,
+      "medicalVisits": 5,
+      "expenses": 18,
+      "forecasts": 6,
+      "visitReports": 1,
+      "attachments": 3
+    },
+    "attachmentBytes": 245760
+  }
+}
+```
+
+## 5.7 반려견 삭제
+
+`DELETE /dogs/{dogId}`
+
+현재 MVP에서는 가족 공유 멤버십이 없으므로 삭제 범위는 “주 보호자가 소유한 펫 전체 삭제”로 고정한다. 삭제 시 연결된 일정, 건강 상태, 복약, 건강 기록, 병원 방문, 첨부 파일 메타데이터, 지출, 비용 예측, 리포트가 함께 삭제된다. 병원 방문 첨부의 실제 업로드 파일도 서버 저장소에서 삭제한다.
+
+향후 가족 공유가 추가되면 이 엔드포인트는 `owner` 권한 사용자에게만 허용하고, 공유 가족이 자신의 목록에서 펫을 제거하는 동작은 별도 membership leave/remove API로 분리한다.
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "deleted": true,
+    "scope": "pet",
+    "accessPolicy": "primary_owner_only"
+  }
+}
+```
+
+## 5.8 반려견 멤버 목록
+
+`GET /dogs/{dogId}/members`
+
+active 멤버십이 있는 사용자는 멤버 목록을 조회할 수 있다.
+
+## 5.9 반려견 멤버 추가
+
+`POST /dogs/{dogId}/members`
+
+현재 구현은 기존 가입자 이메일을 찾아 즉시 active 멤버십을 추가한다. 이메일 초대/수락 플로우는 별도 초대 API에서 구현한다. 이 API는 `owner` 권한이 필요하다.
+
+Request:
+
+```json
+{
+  "email": "family@example.com",
+  "role": "viewer"
+}
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": 10,
+    "dogId": 1,
+    "userId": 2,
+    "role": "viewer",
+    "status": "active",
+    "user": {
+      "id": 2,
+      "email": "family@example.com",
+      "name": "가족"
+    }
+  }
+}
+```
+
+## 5.10 반려견 멤버 역할 변경
+
+`PATCH /dog-memberships/{membershipId}`
+
+`owner` 권한이 필요하다. 본인의 owner 멤버십은 직접 강등하거나 제거할 수 없다.
+
+Request:
+
+```json
+{
+  "role": "editor"
+}
+```
+
+## 5.11 반려견 멤버 제거
+
+`DELETE /dog-memberships/{membershipId}`
+
+멤버십을 물리 삭제하지 않고 `status = removed`로 변경한다. 공유받은 사용자는 이후 반려견 목록에서 해당 펫을 볼 수 없다.
+
 ---
 
 ## 6. 건강 배경 API
@@ -1037,6 +1153,10 @@ Response:
     "latestForecast": {
       "monthlyEstimate": 210000,
       "yearlyEstimate": 2400000
+    },
+    "access": {
+      "role": "owner",
+      "canManage": true
     }
   }
 }
@@ -1110,10 +1230,11 @@ Request:
 
 ## 15. 권한 규칙
 
-- 로그인한 사용자는 자신이 소유하거나 공유받은 반려견 데이터만 조회 가능
-- `dog_members.role = viewer`는 조회만 가능
-- `owner`, `caregiver`는 로그/일정/지출 작성 가능
-- 반려견 삭제, 멤버 초대, 주요 프로필 수정은 `owner` 중심 권한으로 제한 가능
+- 로그인한 사용자는 자신이 주 보호자이거나 `dog_memberships.status = active`인 반려견만 조회 가능
+- `dog_memberships.role`은 `owner`, `editor`, `viewer`를 사용
+- 현재 구현 범위에서는 주 보호자와 신규 생성 펫의 `owner` 멤버십을 항상 함께 유지
+- 반려견 삭제, 삭제 영향도 확인, 주요 프로필 수정은 `owner` 권한으로 제한
+- 향후 초대 API가 추가되면 `viewer`는 조회 전용, `editor`는 로그/일정/지출 작성 가능, `owner`는 멤버 관리와 펫 삭제 가능으로 분리
 
 ---
 

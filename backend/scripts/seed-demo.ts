@@ -49,6 +49,16 @@ async function main() {
       notes: "피부와 귀 상태를 주기적으로 확인합니다.",
     },
   });
+  await prisma.dogMembership.create({
+    data: {
+      dogId: dog.id,
+      userId: user.id,
+      role: "owner",
+      status: "active",
+      invitedBy: user.id,
+      joinedAt: new Date(),
+    },
+  });
 
   await prisma.dogCondition.createMany({
     data: [

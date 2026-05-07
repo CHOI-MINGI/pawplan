@@ -19,6 +19,7 @@ model User {
   updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   dogs             Dog[]
+  dogMemberships   DogMembership[]
   healthLogs       HealthLog[]
   medicalVisits    MedicalVisit[]
   expenses         Expense[]
@@ -46,6 +47,7 @@ model Dog {
   updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   primaryOwner  User            @relation(fields: [primaryOwnerId], references: [id])
+  memberships   DogMembership[]
   conditions    DogCondition[]
   medications   DogMedication[]
   schedules     CareSchedule[]
@@ -58,6 +60,26 @@ model Dog {
   @@index([primaryOwnerId], map: "idx_dogs_primary_owner_id")
   @@index([breed], map: "idx_dogs_breed")
   @@map("dogs")
+}
+
+model DogMembership {
+  id        BigInt    @id @default(autoincrement())
+  dogId     BigInt    @map("dog_id")
+  userId    BigInt    @map("user_id")
+  role      String    @default("viewer") @db.VarChar(20)
+  status    String    @default("active") @db.VarChar(20)
+  invitedBy BigInt?   @map("invited_by")
+  joinedAt  DateTime? @map("joined_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  dog     Dog   @relation(fields: [dogId], references: [id], onDelete: Cascade)
+  user    User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([dogId, userId], map: "dog_memberships_dog_id_user_id_key")
+  @@index([userId, status], map: "idx_dog_memberships_user_status")
+  @@index([dogId, role], map: "idx_dog_memberships_dog_role")
+  @@map("dog_memberships")
 }
 
 model DogCondition {

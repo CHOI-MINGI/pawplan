@@ -94,6 +94,8 @@ Covered screens:
 - Restore mobile sessions from secure device storage
 - Register first dog through onboarding
 - Switch between registered dogs
+- Edit or delete the selected dog profile; deletion shows linked record counts and requires typing the dog name
+- Manage family sharing from the selected dog header: view members, add an existing user by email, change roles, or remove access
 - View dashboard, pending care schedules, latest forecast, and recent logs
 - Browse health logs, medical visits, and expenses together in the Records tab timeline
 - Filter the Records tab timeline by all, health, hospital, or expense items

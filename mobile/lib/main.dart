@@ -2687,6 +2687,7 @@ class _ReportsPane extends StatelessWidget {
     required this.report,
     required this.visitReports,
     required this.busy,
+    required this.canEditRecords,
     required this.forecast,
     required this.fallbackForecast,
     required this.forecastHistory,
@@ -2697,6 +2698,7 @@ class _ReportsPane extends StatelessWidget {
   final JsonMap? report;
   final List<JsonMap> visitReports;
   final bool busy;
+  final bool canEditRecords;
   final JsonMap? forecast;
   final JsonMap? fallbackForecast;
   final List<JsonMap> forecastHistory;
@@ -2710,7 +2712,7 @@ class _ReportsPane extends StatelessWidget {
       children: [
         VisitReportPanel(
           report: report,
-          busy: busy,
+          busy: busy || !canEditRecords,
           onCreate: onCreateVisitReport,
         ),
         const SizedBox(height: 18),
@@ -2729,7 +2731,7 @@ class _ReportsPane extends StatelessWidget {
           forecast: forecast,
           fallback: fallbackForecast,
           history: forecastHistory,
-          busy: busy,
+          busy: busy || !canEditRecords,
           onRecalculate: onRecalculateForecast,
         ),
       ],
@@ -4298,7 +4300,7 @@ Future<void> _showFamilySharingDialog({
                         child: ListView.separated(
                           shrinkWrap: true,
                           itemCount: members.length,
-                          separatorBuilder: (_, __) =>
+                          separatorBuilder: (_, index) =>
                               const Divider(height: 1),
                           itemBuilder: (context, index) {
                             final member = members[index];
@@ -4351,7 +4353,7 @@ Future<void> _showFamilySharingDialog({
                                                 }
                                                 runMemberAction(() async {
                                                   await updateMembership(
-                                                    membershipId: membershipId!,
+                                                    membershipId: membershipId,
                                                     role: value,
                                                   );
                                                 });
@@ -4365,7 +4367,7 @@ Future<void> _showFamilySharingDialog({
                                     onPressed: canEditThis && !busy
                                         ? () => runMemberAction(() async {
                                             await removeMembership(
-                                              membershipId!,
+                                              membershipId,
                                             );
                                           })
                                         : null,

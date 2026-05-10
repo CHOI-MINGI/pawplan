@@ -1,3 +1,5 @@
+// 스모크 테스트: 전체 API 흐름을 간단히 검증하는 E2E 테스트
+
 const apiBaseUrl = (
   process.env.API_BASE_URL ?? "http://localhost:4000/api/v1"
 ).replace(/\/$/, "");

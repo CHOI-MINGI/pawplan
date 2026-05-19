@@ -158,6 +158,11 @@ class ApiClient {
     return data;
   }
 
+  Future<List<JsonMap>> activity(int dogId) async {
+    final data = await _pagedList('/dogs/$dogId/activity?pageSize=30');
+    return data;
+  }
+
   Future<List<JsonMap>> visitReports(int dogId) async {
     final data = await _pagedList('/dogs/$dogId/visit-reports?pageSize=20');
     return data;
@@ -187,6 +192,7 @@ class ApiClient {
     required String diagnosedOn,
     required String status,
     required String notes,
+    bool isSensitive = false,
   }) {
     return _request<JsonMap>(
       'POST',
@@ -198,6 +204,7 @@ class ApiClient {
         'diagnosedOn': diagnosedOn.trim().isEmpty ? null : diagnosedOn,
         'status': status,
         'notes': notes,
+        'isSensitive': isSensitive,
       },
     );
   }
@@ -210,19 +217,20 @@ class ApiClient {
     required String diagnosedOn,
     required String status,
     required String notes,
+    bool? isSensitive,
   }) {
-    return _request<JsonMap>(
-      'PATCH',
-      '/conditions/$conditionId',
-      body: {
-        'conditionType': conditionType,
-        'conditionName': conditionName,
-        'severity': severity,
-        'diagnosedOn': diagnosedOn.trim().isEmpty ? null : diagnosedOn,
-        'status': status,
-        'notes': notes,
-      },
-    );
+    final body = <String, dynamic>{
+      'conditionType': conditionType,
+      'conditionName': conditionName,
+      'severity': severity,
+      'diagnosedOn': diagnosedOn.trim().isEmpty ? null : diagnosedOn,
+      'status': status,
+      'notes': notes,
+    };
+    if (isSensitive != null) {
+      body['isSensitive'] = isSensitive;
+    }
+    return _request<JsonMap>('PATCH', '/conditions/$conditionId', body: body);
   }
 
   Future<JsonMap> deleteCondition(int conditionId) {
@@ -239,6 +247,7 @@ class ApiClient {
     required String prescribedBy,
     required bool isActive,
     required String notes,
+    bool isSensitive = false,
   }) {
     return _request<JsonMap>(
       'POST',
@@ -252,6 +261,7 @@ class ApiClient {
         'prescribedBy': prescribedBy,
         'isActive': isActive,
         'notes': notes,
+        'isSensitive': isSensitive,
       },
     );
   }
@@ -266,21 +276,22 @@ class ApiClient {
     required String prescribedBy,
     required bool isActive,
     required String notes,
+    bool? isSensitive,
   }) {
-    return _request<JsonMap>(
-      'PATCH',
-      '/medications/$medicationId',
-      body: {
-        'medicationName': medicationName,
-        'dosage': dosage,
-        'frequencyText': frequencyText,
-        'startedOn': startedOn.trim().isEmpty ? null : startedOn,
-        'endedOn': endedOn.trim().isEmpty ? null : endedOn,
-        'prescribedBy': prescribedBy,
-        'isActive': isActive,
-        'notes': notes,
-      },
-    );
+    final body = <String, dynamic>{
+      'medicationName': medicationName,
+      'dosage': dosage,
+      'frequencyText': frequencyText,
+      'startedOn': startedOn.trim().isEmpty ? null : startedOn,
+      'endedOn': endedOn.trim().isEmpty ? null : endedOn,
+      'prescribedBy': prescribedBy,
+      'isActive': isActive,
+      'notes': notes,
+    };
+    if (isSensitive != null) {
+      body['isSensitive'] = isSensitive;
+    }
+    return _request<JsonMap>('PATCH', '/medications/$medicationId', body: body);
   }
 
   Future<JsonMap> deleteMedication(int medicationId) {
@@ -299,6 +310,7 @@ class ApiClient {
     required String description,
     required String priority,
     int? repeatCycleDays,
+    int? assignedToUserId,
   }) {
     final body = <String, dynamic>{
       'scheduleType': scheduleType,
@@ -310,28 +322,40 @@ class ApiClient {
     if (repeatCycleDays != null) {
       body['repeatCycleDays'] = repeatCycleDays;
     }
+    if (assignedToUserId != null) {
+      body['assignedToUserId'] = assignedToUserId;
+    }
 
     return _request<JsonMap>('POST', '/dogs/$dogId/care-schedules', body: body);
   }
 
   Future<JsonMap> updateCareSchedule({
     required int scheduleId,
+    required String scheduleType,
     required String title,
     required String dueDate,
     required String description,
     required String priority,
     required bool reminderEnabled,
+    int? repeatCycleDays,
+    int? assignedToUserId,
   }) {
+    final body = <String, dynamic>{
+      'scheduleType': scheduleType,
+      'title': title,
+      'dueDate': dueDate,
+      'description': description,
+      'priority': priority,
+      'reminderEnabled': reminderEnabled,
+      'repeatCycleDays': repeatCycleDays,
+    };
+    if (assignedToUserId != null) {
+      body['assignedToUserId'] = assignedToUserId;
+    }
     return _request<JsonMap>(
       'PATCH',
       '/care-schedules/$scheduleId',
-      body: {
-        'title': title,
-        'dueDate': dueDate,
-        'description': description,
-        'priority': priority,
-        'reminderEnabled': reminderEnabled,
-      },
+      body: body,
     );
   }
 
@@ -359,12 +383,18 @@ class ApiClient {
     required String logType,
     required String title,
     String? memo,
+    String? recordedAt,
     num? valueNumeric,
     String? valueUnit,
+    JsonMap? metadata,
+    bool isSensitive = false,
   }) {
     final body = <String, dynamic>{'logType': logType, 'title': title};
     if (memo != null && memo.trim().isNotEmpty) {
       body['memo'] = memo;
+    }
+    if (recordedAt != null && recordedAt.trim().isNotEmpty) {
+      body['recordedAt'] = recordedAt;
     }
     if (valueNumeric != null) {
       body['valueNumeric'] = valueNumeric;
@@ -372,6 +402,10 @@ class ApiClient {
     if (valueUnit != null && valueUnit.trim().isNotEmpty) {
       body['valueUnit'] = valueUnit;
     }
+    if (metadata != null && metadata.isNotEmpty) {
+      body['metadata'] = metadata;
+    }
+    body['isSensitive'] = isSensitive;
 
     return _request<JsonMap>('POST', '/dogs/$dogId/health-logs', body: body);
   }
@@ -381,19 +415,31 @@ class ApiClient {
     required String logType,
     required String title,
     required String memo,
+    String? recordedAt,
     num? valueNumeric,
     String? valueUnit,
+    JsonMap? metadata,
+    bool? isSensitive,
   }) {
     final body = <String, dynamic>{
       'logType': logType,
       'title': title,
       'memo': memo,
     };
+    if (recordedAt != null && recordedAt.trim().isNotEmpty) {
+      body['recordedAt'] = recordedAt;
+    }
     if (valueNumeric != null) {
       body['valueNumeric'] = valueNumeric;
     }
     if (valueUnit?.trim().isNotEmpty ?? false) {
       body['valueUnit'] = valueUnit;
+    }
+    if (metadata != null) {
+      body['metadata'] = metadata;
+    }
+    if (isSensitive != null) {
+      body['isSensitive'] = isSensitive;
     }
 
     return _request<JsonMap>('PATCH', '/health-logs/$logId', body: body);
@@ -407,8 +453,10 @@ class ApiClient {
     required int dogId,
     required String category,
     required num amount,
+    String? expenseDate,
     String? vendorName,
     String? memo,
+    bool isSensitive = false,
   }) {
     return _request<JsonMap>(
       'POST',
@@ -416,9 +464,12 @@ class ApiClient {
       body: {
         'expenseCategory': category,
         'amount': amount,
+        if (expenseDate != null && expenseDate.trim().isNotEmpty)
+          'expenseDate': expenseDate,
         if (vendorName != null && vendorName.trim().isNotEmpty)
           'vendorName': vendorName,
         if (memo != null && memo.trim().isNotEmpty) 'memo': memo,
+        'isSensitive': isSensitive,
       },
     );
   }
@@ -430,18 +481,19 @@ class ApiClient {
     required String expenseDate,
     required String vendorName,
     required String memo,
+    bool? isSensitive,
   }) {
-    return _request<JsonMap>(
-      'PATCH',
-      '/expenses/$expenseId',
-      body: {
-        'expenseCategory': category,
-        'amount': amount,
-        if (expenseDate.trim().isNotEmpty) 'expenseDate': expenseDate,
-        'vendorName': vendorName,
-        'memo': memo,
-      },
-    );
+    final body = <String, dynamic>{
+      'expenseCategory': category,
+      'amount': amount,
+      if (expenseDate.trim().isNotEmpty) 'expenseDate': expenseDate,
+      'vendorName': vendorName,
+      'memo': memo,
+    };
+    if (isSensitive != null) {
+      body['isSensitive'] = isSensitive;
+    }
+    return _request<JsonMap>('PATCH', '/expenses/$expenseId', body: body);
   }
 
   Future<JsonMap> deleteExpense(int expenseId) {
@@ -451,19 +503,29 @@ class ApiClient {
   Future<JsonMap> createMedicalVisit({
     required int dogId,
     required String hospitalName,
+    String? veterinarianName,
+    String? visitDate,
     required String visitReason,
     required String symptoms,
     required String diagnosis,
     required String treatment,
     required String prescribedItems,
     required String followUpDate,
+    String? notes,
     required num? expenseAmount,
+    String? expenseDate,
+    String? expenseMemo,
+    bool isSensitive = false,
   }) {
     return _request<JsonMap>(
       'POST',
       '/dogs/$dogId/medical-visits',
       body: {
         'hospitalName': hospitalName,
+        if (veterinarianName != null && veterinarianName.trim().isNotEmpty)
+          'veterinarianName': veterinarianName,
+        if (visitDate != null && visitDate.trim().isNotEmpty)
+          'visitDate': visitDate,
         if (visitReason.trim().isNotEmpty) 'visitReason': visitReason,
         if (symptoms.trim().isNotEmpty) 'symptoms': symptoms,
         if (diagnosis.trim().isNotEmpty) 'diagnosis': diagnosis,
@@ -471,11 +533,17 @@ class ApiClient {
         if (prescribedItems.trim().isNotEmpty)
           'prescribedItems': prescribedItems,
         if (followUpDate.trim().isNotEmpty) 'followUpDate': followUpDate,
+        if (notes != null && notes.trim().isNotEmpty) 'notes': notes,
+        'isSensitive': isSensitive,
         if (expenseAmount != null && expenseAmount > 0)
           'expense': {
             'create': true,
             'amount': expenseAmount,
+            if (expenseDate != null && expenseDate.trim().isNotEmpty)
+              'expenseDate': expenseDate,
             'vendorName': hospitalName,
+            if (expenseMemo != null && expenseMemo.trim().isNotEmpty)
+              'memo': expenseMemo,
           },
       },
     );
@@ -484,6 +552,8 @@ class ApiClient {
   Future<JsonMap> updateMedicalVisit({
     required int visitId,
     required String hospitalName,
+    String? veterinarianName,
+    String? visitDate,
     required String visitReason,
     required String symptoms,
     required String diagnosis,
@@ -491,21 +561,26 @@ class ApiClient {
     required String prescribedItems,
     required String followUpDate,
     required String notes,
+    bool? isSensitive,
   }) {
-    return _request<JsonMap>(
-      'PATCH',
-      '/medical-visits/$visitId',
-      body: {
-        'hospitalName': hospitalName,
-        'visitReason': visitReason,
-        'symptoms': symptoms,
-        'diagnosis': diagnosis,
-        'treatment': treatment,
-        'prescribedItems': prescribedItems,
-        if (followUpDate.trim().isNotEmpty) 'followUpDate': followUpDate,
-        'notes': notes,
-      },
-    );
+    final body = <String, dynamic>{
+      'hospitalName': hospitalName,
+      if (veterinarianName != null && veterinarianName.trim().isNotEmpty)
+        'veterinarianName': veterinarianName,
+      if (visitDate != null && visitDate.trim().isNotEmpty)
+        'visitDate': visitDate,
+      'visitReason': visitReason,
+      'symptoms': symptoms,
+      'diagnosis': diagnosis,
+      'treatment': treatment,
+      'prescribedItems': prescribedItems,
+      if (followUpDate.trim().isNotEmpty) 'followUpDate': followUpDate,
+      'notes': notes,
+    };
+    if (isSensitive != null) {
+      body['isSensitive'] = isSensitive;
+    }
+    return _request<JsonMap>('PATCH', '/medical-visits/$visitId', body: body);
   }
 
   Future<JsonMap> deleteMedicalVisit(int visitId) {

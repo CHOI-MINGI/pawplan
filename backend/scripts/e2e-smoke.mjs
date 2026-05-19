@@ -538,6 +538,20 @@ async function main() {
     { token },
   );
   assert(latestReport?.id === report.id, "latest visit report mismatch");
+  assert(
+    latestReport.summary?.reportVersion === "vet_visit_summary_v2",
+    "advanced visit report summary missing",
+  );
+  assert(
+    Array.isArray(latestReport.summary?.questionList) &&
+      latestReport.summary.questionList.length >= 1,
+    "visit report question list missing",
+  );
+  assert(
+    Array.isArray(latestReport.summary?.missingRecords),
+    "visit report missing-record checklist missing",
+  );
+  assert(latestReport.share?.sharePath, "visit report share path missing");
 
   const dashboard = await request("GET", `/dogs/${dogId}/dashboard`, { token });
   assert(dashboard.dog.id === dogId, "dashboard dog mismatch");
@@ -550,6 +564,10 @@ async function main() {
     },
   );
   assert(latestForecast.basic?.monthlyEstimate > 0, "latest forecast missing");
+  assert(
+    latestForecast.basic?.explanation?.insights?.length >= 1,
+    "forecast insights missing",
+  );
   const recalculate = await request(
     "POST",
     `/dogs/${dogId}/cost-forecasts/recalculate`,

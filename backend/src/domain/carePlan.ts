@@ -4,8 +4,142 @@ type Tx = Prisma.TransactionClient | PrismaClient;
 
 const dayMs = 24 * 60 * 60 * 1000;
 
+type CareScheduleLike = {
+  id: bigint;
+  scheduleType: string;
+  title: string;
+  dueDate: Date;
+  repeatCycleDays: number | null;
+  priority: string;
+  status: string;
+  reminderEnabled: boolean;
+  createdBy: bigint | null;
+  assignedTo?: bigint | null;
+};
+
+const scheduleTypeLabels: Record<string, string> = {
+  heartworm: "심장사상충",
+  medication: "복약",
+  deworming: "구충",
+  vaccine: "예방접종",
+  checkup: "건강검진",
+  grooming: "미용·위생",
+};
+
 function addDays(base: Date, days: number) {
   return new Date(base.getTime() + days * dayMs);
+}
+
+function startOfDay(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+export function careScheduleTypeLabel(scheduleType: string) {
+  return scheduleTypeLabels[scheduleType] ?? "돌봄";
+}
+
+export function careReminderPolicy(scheduleType: string, priority: string) {
+  const highPriority = priority === "high";
+  if (scheduleType === "vaccine" || scheduleType === "checkup") {
+    return {
+      leadDays: highPriority ? [7, 1, 0] : [3, 0],
+      hour: 9,
+      minute: 0,
+      delivery: highPriority ? "push_candidate" : "local",
+    };
+  }
+  if (scheduleType === "heartworm" || scheduleType === "medication") {
+    return {
+      leadDays: highPriority ? [1, 0] : [0],
+      hour: 8,
+      minute: 0,
+      delivery: highPriority ? "push_candidate" : "local",
+    };
+  }
+  if (scheduleType === "deworming") {
+    return {
+      leadDays: [3, 0],
+      hour: 9,
+      minute: 0,
+      delivery: highPriority ? "push_candidate" : "local",
+    };
+  }
+  return {
+    leadDays: highPriority ? [1, 0] : [0],
+    hour: scheduleType === "grooming" ? 10 : 9,
+    minute: 0,
+    delivery: "local",
+  };
+}
+
+export function buildCarePlanMetadata(
+  schedule: CareScheduleLike,
+  viewerId: bigint,
+  now = new Date(),
+) {
+  const today = startOfDay(now);
+  const dueDay = startOfDay(schedule.dueDate);
+  const dueInDays = Math.round((dueDay.getTime() - today.getTime()) / dayMs);
+  const overdueDays = Math.max(0, -dueInDays);
+  const repeatFailureThreshold = schedule.repeatCycleDays
+    ? Math.max(2, Math.min(7, Math.ceil(schedule.repeatCycleDays * 0.1)))
+    : 3;
+  const failureStatus =
+    schedule.status !== "pending"
+      ? "closed"
+      : overdueDays >= repeatFailureThreshold
+        ? "missed_repeated"
+        : overdueDays > 0
+          ? "overdue"
+          : dueInDays === 0
+            ? "due_today"
+            : dueInDays <= 7
+              ? "due_soon"
+              : "ok";
+  const policy = careReminderPolicy(schedule.scheduleType, schedule.priority);
+  const responsibleUserId = schedule.assignedTo ?? schedule.createdBy;
+  const responsibleLabel = responsibleUserId
+    ? responsibleUserId === viewerId
+      ? "나"
+      : "가족 구성원"
+    : "담당자 미지정";
+  const pushCandidate =
+    policy.delivery === "push_candidate" ||
+    failureStatus === "missed_repeated" ||
+    (schedule.priority === "high" && failureStatus !== "ok");
+
+  return {
+    typeLabel: careScheduleTypeLabel(schedule.scheduleType),
+    dueInDays,
+    overdueDays,
+    failureStatus,
+    failureMessage:
+      failureStatus === "missed_repeated"
+        ? "반복 일정이 지연되고 있어 담당자 확인이 필요합니다."
+        : failureStatus === "overdue"
+          ? "예정일이 지나 완료 또는 건너뛰기 확인이 필요합니다."
+          : null,
+    reminderPolicy: policy,
+    delivery: pushCandidate ? "push_candidate" : "local",
+    responsibleUserId,
+    responsibleLabel,
+    responsibilitySource: schedule.assignedTo
+      ? "assignee"
+      : schedule.createdBy
+        ? "creator"
+        : "none",
+  };
+}
+
+export function decorateCareSchedule<T extends CareScheduleLike>(
+  schedule: T,
+  viewerId: bigint,
+  now = new Date(),
+) {
+  return {
+    ...schedule,
+    carePlan: buildCarePlanMetadata(schedule, viewerId, now),
+  };
 }
 
 export async function generateDefaultCareSchedules(tx: Tx, dogId: bigint, baseDate: Date, createdBy?: bigint) {

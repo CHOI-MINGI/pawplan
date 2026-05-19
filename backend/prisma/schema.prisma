@@ -25,6 +25,7 @@ model User {
   expenses         Expense[]
   visitReports     VisitReport[]
   visitAttachments MedicalVisitAttachment[]
+  auditEvents      RecordAuditEvent[]
 
   @@map("users")
 }
@@ -56,6 +57,7 @@ model Dog {
   expenses      Expense[]
   forecasts     CostForecast[]
   visitReports  VisitReport[]
+  auditEvents   RecordAuditEvent[]
 
   @@index([primaryOwnerId], map: "idx_dogs_primary_owner_id")
   @@index([breed], map: "idx_dogs_breed")
@@ -91,6 +93,8 @@ model DogCondition {
   diagnosedOn   DateTime? @map("diagnosed_on") @db.Date
   status        String    @default("active") @db.VarChar(20)
   notes         String?
+  isSensitive   Boolean   @default(false) @map("is_sensitive")
+  createdBy     BigInt?   @map("created_by")
   createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -112,6 +116,8 @@ model DogMedication {
   prescribedBy   String?   @map("prescribed_by") @db.VarChar(100)
   isActive       Boolean   @default(true) @map("is_active")
   notes          String?
+  isSensitive    Boolean   @default(false) @map("is_sensitive")
+  createdBy      BigInt?   @map("created_by")
   createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -137,6 +143,7 @@ model CareSchedule {
   reminderEnabled Boolean   @default(true) @map("reminder_enabled")
   lastRemindedAt  DateTime? @map("last_reminded_at") @db.Timestamptz(6)
   createdBy       BigInt?   @map("created_by")
+  assignedTo      BigInt?   @map("assigned_to")
   createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -159,6 +166,7 @@ model HealthLog {
   valueUnit    String?  @map("value_unit") @db.VarChar(20)
   memo         String?
   metadata     Json?
+  isSensitive  Boolean  @default(false) @map("is_sensitive")
   createdBy    BigInt?  @map("created_by")
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
@@ -185,6 +193,7 @@ model MedicalVisit {
   prescribedItems  String?   @map("prescribed_items")
   followUpDate     DateTime? @map("follow_up_date") @db.Date
   notes            String?
+  isSensitive      Boolean   @default(false) @map("is_sensitive")
   createdBy        BigInt?   @map("created_by")
   createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
@@ -229,6 +238,7 @@ model Expense {
   vendorName      String?  @map("vendor_name") @db.VarChar(150)
   memo            String?
   receiptUrl      String?  @map("receipt_url")
+  isSensitive     Boolean  @default(false) @map("is_sensitive")
   createdBy       BigInt?  @map("created_by")
   createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
@@ -285,4 +295,24 @@ model VisitReport {
   @@index([dogId], map: "idx_visit_reports_dog_id")
   @@index([generatedAt(sort: Desc)], map: "idx_visit_reports_generated_at")
   @@map("visit_reports")
+}
+
+model RecordAuditEvent {
+  id         BigInt   @id @default(autoincrement())
+  dogId      BigInt   @map("dog_id")
+  actorId    BigInt?  @map("actor_id")
+  entityType String   @map("entity_type") @db.VarChar(40)
+  entityId   BigInt?  @map("entity_id")
+  action     String   @db.VarChar(30)
+  summary    String?  @db.VarChar(180)
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  dog   Dog   @relation(fields: [dogId], references: [id], onDelete: Cascade)
+  actor User? @relation(fields: [actorId], references: [id])
+
+  @@index([dogId, createdAt(sort: Desc)], map: "idx_record_audit_events_dog_created")
+  @@index([entityType, entityId], map: "idx_record_audit_events_entity")
+  @@index([actorId], map: "idx_record_audit_events_actor")
+  @@map("record_audit_events")
 }

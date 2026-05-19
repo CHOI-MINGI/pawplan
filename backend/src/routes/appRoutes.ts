@@ -6,7 +6,22 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import multer from "multer";
 import { AuthedRequest, requireAuth } from "../auth.js";
-import { generateDefaultCareSchedules } from "../domain/carePlan.js";
+import {
+  decorateCareSchedule,
+  generateDefaultCareSchedules,
+} from "../domain/carePlan.js";
+import {
+  assignmentMeta,
+  buildUserDirectory,
+  canViewSensitiveRecord,
+  collaborationMeta,
+  normalizeSensitiveFlag,
+  sensitiveRecordWhere,
+  userSummarySelect,
+  writeAuditEvent,
+  type AccessRole,
+  type UserDirectory,
+} from "../domain/collaboration.js";
 import {
   latestForecasts,
   recalculateCostForecasts,
@@ -123,7 +138,62 @@ async function dogAccessRole(userId: bigint, dog: { id: bigint; primaryOwnerId: 
     where: { dogId: dog.id, userId, status: "active" },
     select: { role: true },
   });
-  return membership?.role ?? null;
+  return (membership?.role as AccessRole | undefined) ?? null;
+}
+
+async function dogAccessContext(viewerId: bigint, dogId: bigint) {
+  const dog = await requireDogAccess(viewerId, dogId);
+  const role = await dogAccessRole(viewerId, dog);
+  return { dog, role };
+}
+
+async function loadDogUserDirectory(dogId: bigint, extraUserIds: Array<bigint | null | undefined> = []) {
+  const memberships = await prisma.dogMembership.findMany({
+    where: { dogId, status: "active" },
+    include: { user: { select: userSummarySelect } },
+  });
+  const directory = buildUserDirectory(memberships.map((membership) => membership.user));
+  const missingUserIds = extraUserIds
+    .filter((id): id is bigint => id !== null && id !== undefined)
+    .filter((id) => !directory.has(id.toString()));
+  if (missingUserIds.length > 0) {
+    const users = await prisma.user.findMany({
+      where: { id: { in: missingUserIds } },
+      select: userSummarySelect,
+    });
+    for (const user of users) {
+      directory.set(user.id.toString(), user);
+    }
+  }
+  return directory;
+}
+
+async function parseAssignableUserId(
+  value: unknown,
+  dogId: bigint,
+  label = "assignedToUserId",
+) {
+  if (value === undefined) return undefined;
+  if (value === null || value === "") return null;
+  const assignedTo = parseId(String(value), label);
+  const hasAccess = await prisma.dog.findFirst({
+    where: {
+      id: dogId,
+      OR: [
+        { primaryOwnerId: assignedTo },
+        { memberships: { some: { userId: assignedTo, status: "active" } } },
+      ],
+    },
+    select: { id: true },
+  });
+  if (!hasAccess) {
+    throw new HttpError(
+      400,
+      "VALIDATION_ERROR",
+      "assigned user must be an active family member",
+    );
+  }
+  return assignedTo;
 }
 
 function normalizeMembershipRole(value: unknown) {
@@ -258,6 +328,7 @@ async function createNextRecurringSchedule(
       sourceType: schedule.sourceType,
       reminderEnabled: schedule.reminderEnabled,
       createdBy,
+      assignedTo: schedule.assignedTo,
     },
   });
 }
@@ -265,7 +336,17 @@ async function createNextRecurringSchedule(
 async function requireHealthLogAccess(ownerId: bigint, logId: bigint) {
   const log = await prisma.healthLog.findUnique({ where: { id: logId } });
   if (!log) throw new HttpError(404, "NOT_FOUND", "health log not found");
-  await requireDogAccess(ownerId, log.dogId);
+  const { role } = await dogAccessContext(ownerId, log.dogId);
+  if (
+    !canViewSensitiveRecord({
+      accessRole: role,
+      viewerId: ownerId,
+      createdBy: log.createdBy,
+      isSensitive: log.isSensitive,
+    })
+  ) {
+    throw new HttpError(404, "NOT_FOUND", "health log not found");
+  }
   return log;
 }
 
@@ -281,7 +362,17 @@ async function requireMedicalVisitAccess(ownerId: bigint, visitId: bigint) {
     where: { id: visitId },
   });
   if (!visit) throw new HttpError(404, "NOT_FOUND", "medical visit not found");
-  await requireDogAccess(ownerId, visit.dogId);
+  const { role } = await dogAccessContext(ownerId, visit.dogId);
+  if (
+    !canViewSensitiveRecord({
+      accessRole: role,
+      viewerId: ownerId,
+      createdBy: visit.createdBy,
+      isSensitive: visit.isSensitive,
+    })
+  ) {
+    throw new HttpError(404, "NOT_FOUND", "medical visit not found");
+  }
   return visit;
 }
 
@@ -319,7 +410,17 @@ async function requireAttachmentWriteAccess(ownerId: bigint, attachmentId: bigin
 async function requireExpenseAccess(ownerId: bigint, expenseId: bigint) {
   const expense = await prisma.expense.findUnique({ where: { id: expenseId } });
   if (!expense) throw new HttpError(404, "NOT_FOUND", "expense not found");
-  await requireDogAccess(ownerId, expense.dogId);
+  const { role } = await dogAccessContext(ownerId, expense.dogId);
+  if (
+    !canViewSensitiveRecord({
+      accessRole: role,
+      viewerId: ownerId,
+      createdBy: expense.createdBy,
+      isSensitive: expense.isSensitive,
+    })
+  ) {
+    throw new HttpError(404, "NOT_FOUND", "expense not found");
+  }
   return expense;
 }
 
@@ -343,10 +444,136 @@ function timelineType(value: unknown) {
   return "all";
 }
 
+function jsonRecord(value: Prisma.JsonValue | null | undefined) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Prisma.JsonObject;
+}
+
+function visitReportResponse(
+  report: Awaited<ReturnType<typeof prisma.visitReport.findFirst>>,
+) {
+  if (!report) return null;
+  const summary = jsonRecord(report.summaryJson);
+  const sharePath = `/visit-reports/${report.id}`;
+  const summaryShare = jsonRecord(summary?.share);
+  return {
+    ...report,
+    summary,
+    notice: visitReportNotice,
+    share: {
+      ...(summaryShare ?? {}),
+      sharePath,
+      pdfUrl: report.pdfUrl ?? summaryShare?.pdfUrl ?? null,
+      pdfStatus: report.pdfUrl ? "ready" : (summaryShare?.pdfStatus ?? "not_generated"),
+    },
+  };
+}
+
+function recordResponse<T extends {
+  createdBy?: bigint | null;
+  createdAt?: Date | null;
+  updatedAt?: Date | null;
+  isSensitive?: boolean | null;
+}>(
+  record: T,
+  viewerId: bigint,
+  accessRole: AccessRole,
+  users?: UserDirectory,
+) {
+  return {
+    ...record,
+    collaboration: collaborationMeta({
+      record,
+      viewerId,
+      accessRole,
+      users,
+    }),
+  };
+}
+
+function auditEventVisible<T extends {
+  actorId: bigint | null;
+  metadata: Prisma.JsonValue | null;
+}>(event: T, viewerId: bigint, accessRole: AccessRole) {
+  const metadata = jsonRecord(event.metadata);
+  return canViewSensitiveRecord({
+    accessRole,
+    viewerId,
+    createdBy: event.actorId,
+    isSensitive: metadata?.isSensitive === true,
+  });
+}
+
+function auditEventResponse<T extends {
+  actorId: bigint | null;
+  action: string;
+  metadata: Prisma.JsonValue | null;
+  actor?: { id: bigint; email: string; name: string } | null;
+}>(event: T, viewerId: bigint) {
+  const actorLabel = event.actorId
+    ? event.actorId === viewerId
+      ? "나"
+      : event.actor?.name ?? "가족 구성원"
+    : "시스템";
+  return {
+    ...event,
+    actorLabel,
+    metadata: jsonRecord(event.metadata),
+  };
+}
+
+function careScheduleResponse<T extends {
+  id: bigint;
+  scheduleType: string;
+  title: string;
+  dueDate: Date;
+  repeatCycleDays: number | null;
+  priority: string;
+  status: string;
+  reminderEnabled: boolean;
+  createdBy: bigint | null;
+  assignedTo?: bigint | null;
+  createdAt?: Date | null;
+  updatedAt?: Date | null;
+}>(
+  schedule: T,
+  viewerId: bigint,
+  accessRole: AccessRole = null,
+  users?: UserDirectory,
+) {
+  const decorated = decorateCareSchedule(schedule, viewerId);
+  const assignment = assignmentMeta({
+    assignedTo: schedule.assignedTo,
+    fallbackUserId: schedule.createdBy,
+    viewerId,
+    users,
+  });
+  return {
+    ...decorated,
+    assignedToUserId: assignment.responsibleUserId,
+    carePlan: {
+      ...decorated.carePlan,
+      ...assignment,
+    },
+    collaboration: collaborationMeta({
+      record: schedule,
+      viewerId,
+      accessRole,
+      users,
+    }),
+  };
+}
+
 function forecastResponse(
   row: Awaited<ReturnType<typeof latestForecasts>>["basic"],
 ) {
   if (!row) return null;
+  const breakdown = jsonRecord(row.breakdown);
+  const assumptions = jsonRecord(row.assumptions);
+  const explanation =
+    assumptions && "explanation" in assumptions ? assumptions.explanation : null;
   return {
     monthlyEstimate: row.monthlyEstimate,
     rangeMin: row.rangeMin,
@@ -355,7 +582,9 @@ function forecastResponse(
     sixMonthEstimate: row.sixMonthEstimate,
     lifetimeEstimate: row.lifetimeEstimate,
     confidenceLevel: row.confidenceLevel,
-    breakdown: row.breakdown,
+    breakdown,
+    assumptions,
+    explanation,
   };
 }
 
@@ -747,6 +976,15 @@ appRoutes.post(
         user: { select: { id: true, email: true, name: true } },
       },
     });
+    await writeAuditEvent(prisma, {
+      dogId,
+      actorId: ownerId,
+      entityType: "membership",
+      entityId: membership.id,
+      action: "upsert",
+      summary: `${membership.user.name} ${membership.role}`,
+      metadata: { role: membership.role },
+    });
 
     ok(
       res,
@@ -798,6 +1036,15 @@ appRoutes.patch(
         user: { select: { id: true, email: true, name: true } },
       },
     });
+    await writeAuditEvent(prisma, {
+      dogId: membership.dogId,
+      actorId: ownerId,
+      entityType: "membership",
+      entityId: membership.id,
+      action: "update",
+      summary: `${membership.user.name} ${membership.role}`,
+      metadata: { role: membership.role, status: membership.status },
+    });
 
     ok(res, {
       id: membership.id,
@@ -830,6 +1077,15 @@ appRoutes.delete(
       where: { id: membershipId },
       data: { status: "removed" },
     });
+    await writeAuditEvent(prisma, {
+      dogId: existing.dogId,
+      actorId: ownerId,
+      entityType: "membership",
+      entityId: membershipId,
+      action: "remove",
+      summary: existing.userId.toString(),
+      metadata: { status: "removed" },
+    });
 
     ok(res, { removed: true });
   }),
@@ -840,19 +1096,32 @@ appRoutes.get(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
-    const dog = await requireDogAccess(ownerId, dogId);
-    const role = await dogAccessRole(ownerId, dog);
+    const { dog, role } = await dogAccessContext(ownerId, dogId);
+    const recordVisibility = sensitiveRecordWhere(role, ownerId);
+    const canEditRecords = role === "owner" || role === "editor";
     const today = new Date();
     const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
     const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
-    const [todaySchedules, recentHealthLogs, expenses, forecasts] =
+    const [
+      todaySchedules,
+      recentHealthLogs,
+      expenses,
+      forecasts,
+      members,
+      rawActivity,
+      hiddenConditions,
+      hiddenMedications,
+      hiddenHealthLogs,
+      hiddenMedicalVisits,
+      hiddenExpenses,
+    ] =
       await Promise.all([
         prisma.careSchedule.findMany({
           where: {
             dogId,
             status: "pending",
             dueDate: {
-              gte: new Date(today.toISOString().slice(0, 10)),
+              gte: addDays(new Date(today.toISOString().slice(0, 10)), -30),
               lte: monthEnd,
             },
           },
@@ -860,15 +1129,82 @@ appRoutes.get(
           take: 5,
         }),
         prisma.healthLog.findMany({
-          where: { dogId },
+          where: { dogId, ...recordVisibility },
           orderBy: { recordedAt: "desc" },
           take: 5,
         }),
         prisma.expense.findMany({
-          where: { dogId, expenseDate: { gte: monthStart, lte: monthEnd } },
+          where: {
+            dogId,
+            ...recordVisibility,
+            expenseDate: { gte: monthStart, lte: monthEnd },
+          },
         }),
         latestForecasts(prisma, dogId),
+        prisma.dogMembership.findMany({
+          where: { dogId, status: "active" },
+          orderBy: [{ role: "asc" }, { createdAt: "asc" }],
+          include: { user: { select: userSummarySelect } },
+        }),
+        prisma.recordAuditEvent.findMany({
+          where: { dogId },
+          orderBy: { createdAt: "desc" },
+          take: 20,
+          include: { actor: { select: userSummarySelect } },
+        }),
+        canEditRecords
+          ? Promise.resolve(0)
+          : prisma.dogCondition.count({
+              where: {
+                dogId,
+                isSensitive: true,
+                NOT: { createdBy: ownerId },
+              },
+            }),
+        canEditRecords
+          ? Promise.resolve(0)
+          : prisma.dogMedication.count({
+              where: {
+                dogId,
+                isSensitive: true,
+                NOT: { createdBy: ownerId },
+              },
+            }),
+        canEditRecords
+          ? Promise.resolve(0)
+          : prisma.healthLog.count({
+              where: {
+                dogId,
+                isSensitive: true,
+                NOT: { createdBy: ownerId },
+              },
+            }),
+        canEditRecords
+          ? Promise.resolve(0)
+          : prisma.medicalVisit.count({
+              where: {
+                dogId,
+                isSensitive: true,
+                NOT: { createdBy: ownerId },
+              },
+            }),
+        canEditRecords
+          ? Promise.resolve(0)
+          : prisma.expense.count({
+              where: {
+                dogId,
+                isSensitive: true,
+                NOT: { createdBy: ownerId },
+              },
+            }),
       ]);
+    const userDirectory = buildUserDirectory(
+      members.map((membership) => membership.user),
+    );
+    const recentActivity = rawActivity
+      .filter((event) => auditEventVisible(event, ownerId, role))
+      .slice(0, 8)
+      .map((event) => auditEventResponse(event, ownerId));
 
     const byCategory = Object.values(
       expenses.reduce<Record<string, { category: string; amount: number }>>(
@@ -897,8 +1233,12 @@ appRoutes.get(
         insuranceStatus: dog.insuranceStatus,
         notes: dog.notes,
       },
-      todaySchedules,
-      recentHealthLogs,
+      todaySchedules: todaySchedules.map((schedule) =>
+        careScheduleResponse(schedule, ownerId, role, userDirectory),
+      ),
+      recentHealthLogs: recentHealthLogs.map((log) =>
+        recordResponse(log, ownerId, role, userDirectory),
+      ),
       monthlyExpenseSummary: {
         totalAmount: byCategory.reduce((sum, item) => sum + item.amount, 0),
         byCategory,
@@ -910,8 +1250,36 @@ appRoutes.get(
           }
         : null,
       access: {
+        userId: ownerId,
         role,
         canManage: role === "owner",
+        canEditRecords,
+        canViewSensitive: canEditRecords,
+      },
+      collaboration: {
+        members: members.map((membership) => ({
+          id: membership.id,
+          dogId: membership.dogId,
+          userId: membership.userId,
+          role: membership.role,
+          status: membership.status,
+          joinedAt: membership.joinedAt,
+          user: membership.user,
+        })),
+        hiddenSensitiveCounts: {
+          conditions: hiddenConditions,
+          medications: hiddenMedications,
+          healthLogs: hiddenHealthLogs,
+          medicalVisits: hiddenMedicalVisits,
+          expenses: hiddenExpenses,
+          total:
+            hiddenConditions +
+            hiddenMedications +
+            hiddenHealthLogs +
+            hiddenMedicalVisits +
+            hiddenExpenses,
+        },
+        recentActivity,
       },
     });
   }),
@@ -922,16 +1290,26 @@ appRoutes.get(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
-    await requireDogAccess(ownerId, dogId);
+    const { role } = await dogAccessContext(ownerId, dogId);
     const conditions = await prisma.dogCondition.findMany({
       where: {
         dogId,
+        ...sensitiveRecordWhere(role, ownerId),
         status:
           typeof req.query.status === "string" ? req.query.status : undefined,
       },
       orderBy: [{ status: "asc" }, { updatedAt: "desc" }],
     });
-    ok(res, conditions);
+    const users = await loadDogUserDirectory(
+      dogId,
+      conditions.map((condition) => condition.createdBy),
+    );
+    ok(
+      res,
+      conditions.map((condition) =>
+        recordResponse(condition, ownerId, role, users),
+      ),
+    );
   }),
 );
 
@@ -952,9 +1330,20 @@ appRoutes.post(
         status:
           typeof req.body.status === "string" ? req.body.status : "active",
         notes: typeof req.body.notes === "string" ? req.body.notes : undefined,
+        isSensitive: normalizeSensitiveFlag(req.body),
+        createdBy: ownerId,
       },
     });
     await recalculateCostForecasts(prisma, dogId);
+    await writeAuditEvent(prisma, {
+      dogId,
+      actorId: ownerId,
+      entityType: "condition",
+      entityId: condition.id,
+      action: "create",
+      summary: condition.conditionName,
+      metadata: { isSensitive: condition.isSensitive },
+    });
     ok(res, condition, 201);
   }),
 );
@@ -982,9 +1371,22 @@ appRoutes.patch(
         status:
           typeof req.body.status === "string" ? req.body.status : undefined,
         notes: typeof req.body.notes === "string" ? req.body.notes : undefined,
+        isSensitive:
+          req.body.isSensitive === undefined
+            ? undefined
+            : normalizeSensitiveFlag(req.body),
       },
     });
     await recalculateCostForecasts(prisma, existing.dogId);
+    await writeAuditEvent(prisma, {
+      dogId: existing.dogId,
+      actorId: ownerId,
+      entityType: "condition",
+      entityId: condition.id,
+      action: "update",
+      summary: condition.conditionName,
+      metadata: { isSensitive: condition.isSensitive },
+    });
     ok(res, condition);
   }),
 );
@@ -997,6 +1399,15 @@ appRoutes.delete(
     const existing = await requireConditionWriteAccess(ownerId, conditionId);
     await prisma.dogCondition.delete({ where: { id: conditionId } });
     await recalculateCostForecasts(prisma, existing.dogId);
+    await writeAuditEvent(prisma, {
+      dogId: existing.dogId,
+      actorId: ownerId,
+      entityType: "condition",
+      entityId: conditionId,
+      action: "delete",
+      summary: existing.conditionName,
+      metadata: { isSensitive: existing.isSensitive },
+    });
     ok(res, { deleted: true });
   }),
 );
@@ -1006,13 +1417,26 @@ appRoutes.get(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
-    await requireDogAccess(ownerId, dogId);
+    const { role } = await dogAccessContext(ownerId, dogId);
     const onlyActive = req.query.active === "true";
     const medications = await prisma.dogMedication.findMany({
-      where: { dogId, isActive: onlyActive ? true : undefined },
+      where: {
+        dogId,
+        ...sensitiveRecordWhere(role, ownerId),
+        isActive: onlyActive ? true : undefined,
+      },
       orderBy: [{ isActive: "desc" }, { updatedAt: "desc" }],
     });
-    ok(res, medications);
+    const users = await loadDogUserDirectory(
+      dogId,
+      medications.map((medication) => medication.createdBy),
+    );
+    ok(
+      res,
+      medications.map((medication) =>
+        recordResponse(medication, ownerId, role, users),
+      ),
+    );
   }),
 );
 
@@ -1043,9 +1467,20 @@ appRoutes.post(
             : undefined,
         isActive: req.body.isActive !== false,
         notes: typeof req.body.notes === "string" ? req.body.notes : undefined,
+        isSensitive: normalizeSensitiveFlag(req.body),
+        createdBy: ownerId,
       },
     });
     await recalculateCostForecasts(prisma, dogId);
+    await writeAuditEvent(prisma, {
+      dogId,
+      actorId: ownerId,
+      entityType: "medication",
+      entityId: medication.id,
+      action: "create",
+      summary: medication.medicationName,
+      metadata: { isSensitive: medication.isSensitive },
+    });
     ok(res, medication, 201);
   }),
 );
@@ -1080,9 +1515,22 @@ appRoutes.patch(
             ? req.body.isActive
             : undefined,
         notes: typeof req.body.notes === "string" ? req.body.notes : undefined,
+        isSensitive:
+          req.body.isSensitive === undefined
+            ? undefined
+            : normalizeSensitiveFlag(req.body),
       },
     });
     await recalculateCostForecasts(prisma, existing.dogId);
+    await writeAuditEvent(prisma, {
+      dogId: existing.dogId,
+      actorId: ownerId,
+      entityType: "medication",
+      entityId: medication.id,
+      action: "update",
+      summary: medication.medicationName,
+      metadata: { isSensitive: medication.isSensitive },
+    });
     ok(res, medication);
   }),
 );
@@ -1095,6 +1543,15 @@ appRoutes.delete(
     const existing = await requireMedicationWriteAccess(ownerId, medicationId);
     await prisma.dogMedication.delete({ where: { id: medicationId } });
     await recalculateCostForecasts(prisma, existing.dogId);
+    await writeAuditEvent(prisma, {
+      dogId: existing.dogId,
+      actorId: ownerId,
+      entityType: "medication",
+      entityId: medicationId,
+      action: "delete",
+      summary: existing.medicationName,
+      metadata: { isSensitive: existing.isSensitive },
+    });
     ok(res, { deleted: true });
   }),
 );
@@ -1120,7 +1577,7 @@ appRoutes.get(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
-    await requireDogAccess(ownerId, dogId);
+    const { role } = await dogAccessContext(ownerId, dogId);
     const schedules = await prisma.careSchedule.findMany({
       where: {
         dogId,
@@ -1139,7 +1596,16 @@ appRoutes.get(
       },
       orderBy: { dueDate: "asc" },
     });
-    ok(res, schedules);
+    const users = await loadDogUserDirectory(
+      dogId,
+      schedules.flatMap((schedule) => [schedule.createdBy, schedule.assignedTo]),
+    );
+    ok(
+      res,
+      schedules.map((schedule) =>
+        careScheduleResponse(schedule, ownerId, role, users),
+      ),
+    );
   }),
 );
 
@@ -1149,6 +1615,11 @@ appRoutes.post(
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
     await requireDogWriteAccess(ownerId, dogId);
+    const { role } = await dogAccessContext(ownerId, dogId);
+    const assignedTo = await parseAssignableUserId(
+      req.body.assignedToUserId ?? req.body.assignedTo,
+      dogId,
+    );
     const schedule = await prisma.careSchedule.create({
       data: {
         dogId,
@@ -1170,21 +1641,43 @@ appRoutes.post(
             ? req.body.sourceType
             : "manual",
         createdBy: ownerId,
+        assignedTo: assignedTo === undefined ? ownerId : assignedTo,
       },
     });
-    ok(res, schedule, 201);
+    await writeAuditEvent(prisma, {
+      dogId,
+      actorId: ownerId,
+      entityType: "care_schedule",
+      entityId: schedule.id,
+      action: "create",
+      summary: schedule.title,
+      metadata: {
+        scheduleType: schedule.scheduleType,
+        assignedTo: schedule.assignedTo?.toString() ?? null,
+      },
+    });
+    const users = await loadDogUserDirectory(dogId, [
+      schedule.createdBy,
+      schedule.assignedTo,
+    ]);
+    ok(res, careScheduleResponse(schedule, ownerId, role, users), 201);
   }),
 );
 
 appRoutes.get(
   "/care-schedules/:scheduleId",
   asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const scheduleId = parseId(req.params.scheduleId, "scheduleId");
+    const schedule = await requireScheduleAccess(ownerId, scheduleId);
+    const { role } = await dogAccessContext(ownerId, schedule.dogId);
+    const users = await loadDogUserDirectory(schedule.dogId, [
+      schedule.createdBy,
+      schedule.assignedTo,
+    ]);
     ok(
       res,
-      await requireScheduleAccess(
-        userId(req as AuthedRequest),
-        parseId(req.params.scheduleId, "scheduleId"),
-      ),
+      careScheduleResponse(schedule, ownerId, role, users),
     );
   }),
 );
@@ -1194,7 +1687,12 @@ appRoutes.patch(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const scheduleId = parseId(req.params.scheduleId, "scheduleId");
-    await requireScheduleWriteAccess(ownerId, scheduleId);
+    const existing = await requireScheduleWriteAccess(ownerId, scheduleId);
+    const { role } = await dogAccessContext(ownerId, existing.dogId);
+    const assignedTo = await parseAssignableUserId(
+      req.body.assignedToUserId ?? req.body.assignedTo,
+      existing.dogId,
+    );
     const schedule = await prisma.careSchedule.update({
       where: { id: scheduleId },
       data: {
@@ -1204,15 +1702,42 @@ appRoutes.patch(
             ? req.body.description
             : undefined,
         dueDate: optionalDate(req.body.dueDate),
+        scheduleType:
+          typeof req.body.scheduleType === "string"
+            ? req.body.scheduleType
+            : undefined,
+        repeatCycleDays:
+          req.body.repeatCycleDays === null
+            ? null
+            : typeof req.body.repeatCycleDays === "number"
+              ? req.body.repeatCycleDays
+              : undefined,
         priority:
           typeof req.body.priority === "string" ? req.body.priority : undefined,
         reminderEnabled:
           typeof req.body.reminderEnabled === "boolean"
             ? req.body.reminderEnabled
             : undefined,
+        assignedTo,
       },
     });
-    ok(res, schedule);
+    await writeAuditEvent(prisma, {
+      dogId: existing.dogId,
+      actorId: ownerId,
+      entityType: "care_schedule",
+      entityId: schedule.id,
+      action: "update",
+      summary: schedule.title,
+      metadata: {
+        scheduleType: schedule.scheduleType,
+        assignedTo: schedule.assignedTo?.toString() ?? null,
+      },
+    });
+    const users = await loadDogUserDirectory(existing.dogId, [
+      schedule.createdBy,
+      schedule.assignedTo,
+    ]);
+    ok(res, careScheduleResponse(schedule, ownerId, role, users));
   }),
 );
 
@@ -1222,8 +1747,13 @@ appRoutes.post(
     const ownerId = userId(req as AuthedRequest);
     const scheduleId = parseId(req.params.scheduleId, "scheduleId");
     const existing = await requireScheduleWriteAccess(ownerId, scheduleId);
+    const { role } = await dogAccessContext(ownerId, existing.dogId);
     if (existing.status !== "pending") {
-      ok(res, existing);
+      const users = await loadDogUserDirectory(existing.dogId, [
+        existing.createdBy,
+        existing.assignedTo,
+      ]);
+      ok(res, careScheduleResponse(existing, ownerId, role, users));
       return;
     }
     const completedAt = optionalDate(req.body.completedAt) ?? new Date();
@@ -1233,8 +1763,21 @@ appRoutes.post(
     });
 
     await createNextRecurringSchedule(existing, ownerId);
+    await writeAuditEvent(prisma, {
+      dogId: existing.dogId,
+      actorId: ownerId,
+      entityType: "care_schedule",
+      entityId: schedule.id,
+      action: "complete",
+      summary: schedule.title,
+      metadata: { scheduleType: schedule.scheduleType },
+    });
 
-    ok(res, schedule);
+    const users = await loadDogUserDirectory(existing.dogId, [
+      schedule.createdBy,
+      schedule.assignedTo,
+    ]);
+    ok(res, careScheduleResponse(schedule, ownerId, role, users));
   }),
 );
 
@@ -1244,8 +1787,13 @@ appRoutes.post(
     const ownerId = userId(req as AuthedRequest);
     const scheduleId = parseId(req.params.scheduleId, "scheduleId");
     const existing = await requireScheduleWriteAccess(ownerId, scheduleId);
+    const { role } = await dogAccessContext(ownerId, existing.dogId);
     if (existing.status !== "pending") {
-      ok(res, existing);
+      const users = await loadDogUserDirectory(existing.dogId, [
+        existing.createdBy,
+        existing.assignedTo,
+      ]);
+      ok(res, careScheduleResponse(existing, ownerId, role, users));
       return;
     }
     const schedule = await prisma.careSchedule.update({
@@ -1253,7 +1801,20 @@ appRoutes.post(
       data: { status: "skipped" },
     });
     await createNextRecurringSchedule(existing, ownerId);
-    ok(res, schedule);
+    await writeAuditEvent(prisma, {
+      dogId: existing.dogId,
+      actorId: ownerId,
+      entityType: "care_schedule",
+      entityId: schedule.id,
+      action: "skip",
+      summary: schedule.title,
+      metadata: { scheduleType: schedule.scheduleType },
+    });
+    const users = await loadDogUserDirectory(existing.dogId, [
+      schedule.createdBy,
+      schedule.assignedTo,
+    ]);
+    ok(res, careScheduleResponse(schedule, ownerId, role, users));
   }),
 );
 
@@ -1262,7 +1823,7 @@ appRoutes.get(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
-    await requireDogAccess(ownerId, dogId);
+    const { role } = await dogAccessContext(ownerId, dogId);
     const { page, pageSize, skip } = parsePaging(req as AuthedRequest);
     const type = timelineType(req.query.type);
     const from = optionalDate(req.query.from);
@@ -1272,9 +1833,10 @@ appRoutes.get(
       ...(from ? { gte: from } : {}),
       ...(to ? { lte: to } : {}),
     };
-    const healthWhere = { dogId, recordedAt: dateFilter };
-    const visitWhere = { dogId, visitDate: dateFilter };
-    const expenseWhere = { dogId, expenseDate: dateFilter };
+    const recordVisibility = sensitiveRecordWhere(role, ownerId);
+    const healthWhere = { dogId, ...recordVisibility, recordedAt: dateFilter };
+    const visitWhere = { dogId, ...recordVisibility, visitDate: dateFilter };
+    const expenseWhere = { dogId, ...recordVisibility, expenseDate: dateFilter };
 
     const [logs, visits, expenses, healthTotal, visitTotal, expenseTotal] =
       await Promise.all([
@@ -1310,6 +1872,11 @@ appRoutes.get(
           ? prisma.expense.count({ where: expenseWhere })
           : 0,
       ]);
+    const users = await loadDogUserDirectory(dogId, [
+      ...logs.map((log) => log.createdBy),
+      ...visits.map((visit) => visit.createdBy),
+      ...expenses.map((expense) => expense.createdBy),
+    ]);
 
     const items = [
       ...logs.map((log) => ({
@@ -1322,6 +1889,12 @@ appRoutes.get(
           log.valueNumeric !== null && log.valueNumeric !== undefined
             ? `${log.valueNumeric}${log.valueUnit ?? ""}`
             : log.memo,
+        collaboration: collaborationMeta({
+          record: log,
+          viewerId: ownerId,
+          accessRole: role,
+          users,
+        }),
       })),
       ...visits.map((visit) => ({
         itemType: "medical_visit",
@@ -1331,6 +1904,12 @@ appRoutes.get(
         summary: visit.visitReason ?? visit.diagnosis,
         hospitalName: visit.hospitalName,
         attachmentCount: visit._count.attachments,
+        collaboration: collaborationMeta({
+          record: visit,
+          viewerId: ownerId,
+          accessRole: role,
+          users,
+        }),
       })),
       ...expenses.map((expense) => ({
         itemType: "expense",
@@ -1340,6 +1919,12 @@ appRoutes.get(
         summary: expense.vendorName ?? expense.memo,
         expenseCategory: expense.expenseCategory,
         amount: expense.amount,
+        collaboration: collaborationMeta({
+          record: expense,
+          viewerId: ownerId,
+          accessRole: role,
+          users,
+        }),
       })),
     ].sort(
       (a, b) => new Date(b.eventAt).getTime() - new Date(a.eventAt).getTime(),
@@ -1355,14 +1940,42 @@ appRoutes.get(
 );
 
 appRoutes.get(
+  "/dogs/:dogId/activity",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const dogId = parseId(req.params.dogId, "dogId");
+    const { role } = await dogAccessContext(ownerId, dogId);
+    const { page, pageSize, skip } = parsePaging(req as AuthedRequest);
+    const rawEvents = await prisma.recordAuditEvent.findMany({
+      where: { dogId },
+      orderBy: { createdAt: "desc" },
+      skip,
+      take: pageSize * 2,
+      include: { actor: { select: userSummarySelect } },
+    });
+    const visibleEvents = rawEvents
+      .filter((event) => auditEventVisible(event, ownerId, role))
+      .slice(0, pageSize)
+      .map((event) => auditEventResponse(event, ownerId));
+    ok(res, {
+      items: visibleEvents,
+      page,
+      pageSize,
+      total: visibleEvents.length + skip,
+    });
+  }),
+);
+
+appRoutes.get(
   "/dogs/:dogId/health-logs",
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
-    await requireDogAccess(ownerId, dogId);
+    const { role } = await dogAccessContext(ownerId, dogId);
     const { page, pageSize, skip } = parsePaging(req as AuthedRequest);
     const where = {
       dogId,
+      ...sensitiveRecordWhere(role, ownerId),
       logType: typeof req.query.type === "string" ? req.query.type : undefined,
     };
     const [items, total] = await Promise.all([
@@ -1374,7 +1987,16 @@ appRoutes.get(
       }),
       prisma.healthLog.count({ where }),
     ]);
-    ok(res, { items, page, pageSize, total });
+    const users = await loadDogUserDirectory(
+      dogId,
+      items.map((item) => item.createdBy),
+    );
+    ok(res, {
+      items: items.map((item) => recordResponse(item, ownerId, role, users)),
+      page,
+      pageSize,
+      total,
+    });
   }),
 );
 
@@ -1384,6 +2006,7 @@ appRoutes.post(
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
     await requireDogWriteAccess(ownerId, dogId);
+    const { role } = await dogAccessContext(ownerId, dogId);
     const log = await prisma.healthLog.create({
       data: {
         dogId,
@@ -1398,23 +2021,35 @@ appRoutes.post(
         memo: typeof req.body.memo === "string" ? req.body.memo : undefined,
         metadata:
           req.body.metadata === undefined ? Prisma.JsonNull : req.body.metadata,
+        isSensitive: normalizeSensitiveFlag(req.body),
         createdBy: ownerId,
       },
     });
-    ok(res, log, 201);
+    await writeAuditEvent(prisma, {
+      dogId,
+      actorId: ownerId,
+      entityType: "health_log",
+      entityId: log.id,
+      action: "create",
+      summary: log.title ?? log.logType,
+      metadata: { isSensitive: log.isSensitive },
+    });
+    const users = await loadDogUserDirectory(dogId, [log.createdBy]);
+    ok(res, recordResponse(log, ownerId, role, users), 201);
   }),
 );
 
 appRoutes.get(
   "/health-logs/:logId",
   asyncHandler(async (req, res) => {
-    ok(
-      res,
-      await requireHealthLogAccess(
-        userId(req as AuthedRequest),
-        parseId(req.params.logId, "logId"),
-      ),
+    const ownerId = userId(req as AuthedRequest);
+    const log = await requireHealthLogAccess(
+      ownerId,
+      parseId(req.params.logId, "logId"),
     );
+    const { role } = await dogAccessContext(ownerId, log.dogId);
+    const users = await loadDogUserDirectory(log.dogId, [log.createdBy]);
+    ok(res, recordResponse(log, ownerId, role, users));
   }),
 );
 
@@ -1423,28 +2058,41 @@ appRoutes.patch(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const logId = parseId(req.params.logId, "logId");
-    await requireHealthLogWriteAccess(ownerId, logId);
-    ok(
-      res,
-      await prisma.healthLog.update({
-        where: { id: logId },
-        data: {
-          logType:
-            typeof req.body.logType === "string" ? req.body.logType : undefined,
-          title:
-            typeof req.body.title === "string" ? req.body.title : undefined,
-          recordedAt: optionalDate(req.body.recordedAt),
-          valueNumeric: optionalNumber(req.body.valueNumeric),
-          valueUnit:
-            typeof req.body.valueUnit === "string"
-              ? req.body.valueUnit
-              : undefined,
-          memo: typeof req.body.memo === "string" ? req.body.memo : undefined,
-          metadata:
-            req.body.metadata === undefined ? undefined : req.body.metadata,
-        },
-      }),
-    );
+    const existing = await requireHealthLogWriteAccess(ownerId, logId);
+    const { role } = await dogAccessContext(ownerId, existing.dogId);
+    const log = await prisma.healthLog.update({
+      where: { id: logId },
+      data: {
+        logType:
+          typeof req.body.logType === "string" ? req.body.logType : undefined,
+        title:
+          typeof req.body.title === "string" ? req.body.title : undefined,
+        recordedAt: optionalDate(req.body.recordedAt),
+        valueNumeric: optionalNumber(req.body.valueNumeric),
+        valueUnit:
+          typeof req.body.valueUnit === "string"
+            ? req.body.valueUnit
+            : undefined,
+        memo: typeof req.body.memo === "string" ? req.body.memo : undefined,
+        metadata:
+          req.body.metadata === undefined ? undefined : req.body.metadata,
+        isSensitive:
+          req.body.isSensitive === undefined
+            ? undefined
+            : normalizeSensitiveFlag(req.body),
+      },
+    });
+    await writeAuditEvent(prisma, {
+      dogId: existing.dogId,
+      actorId: ownerId,
+      entityType: "health_log",
+      entityId: log.id,
+      action: "update",
+      summary: log.title ?? log.logType,
+      metadata: { isSensitive: log.isSensitive },
+    });
+    const users = await loadDogUserDirectory(existing.dogId, [log.createdBy]);
+    ok(res, recordResponse(log, ownerId, role, users));
   }),
 );
 
@@ -1454,7 +2102,16 @@ appRoutes.delete(
     const ownerId = userId(req as AuthedRequest);
     const logId = parseId(req.params.logId, "logId");
     await requireHealthLogWriteAccess(ownerId, logId);
-    await prisma.healthLog.delete({ where: { id: logId } });
+    const existing = await prisma.healthLog.delete({ where: { id: logId } });
+    await writeAuditEvent(prisma, {
+      dogId: existing.dogId,
+      actorId: ownerId,
+      entityType: "health_log",
+      entityId: logId,
+      action: "delete",
+      summary: existing.title ?? existing.logType,
+      metadata: { isSensitive: existing.isSensitive },
+    });
     ok(res, { deleted: true });
   }),
 );
@@ -1464,19 +2121,30 @@ appRoutes.get(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
-    await requireDogAccess(ownerId, dogId);
+    const { role } = await dogAccessContext(ownerId, dogId);
     const { page, pageSize, skip } = parsePaging(req as AuthedRequest);
     const [items, total] = await Promise.all([
       prisma.medicalVisit.findMany({
-        where: { dogId },
+        where: { dogId, ...sensitiveRecordWhere(role, ownerId) },
         orderBy: { visitDate: "desc" },
         include: { attachments: { orderBy: { createdAt: "desc" } } },
         skip,
         take: pageSize,
       }),
-      prisma.medicalVisit.count({ where: { dogId } }),
+      prisma.medicalVisit.count({
+        where: { dogId, ...sensitiveRecordWhere(role, ownerId) },
+      }),
     ]);
-    ok(res, { items, page, pageSize, total });
+    const users = await loadDogUserDirectory(
+      dogId,
+      items.map((item) => item.createdBy),
+    );
+    ok(res, {
+      items: items.map((item) => recordResponse(item, ownerId, role, users)),
+      page,
+      pageSize,
+      total,
+    });
   }),
 );
 
@@ -1519,6 +2187,7 @@ appRoutes.post(
           followUpDate: optionalDate(req.body.followUpDate),
           notes:
             typeof req.body.notes === "string" ? req.body.notes : undefined,
+          isSensitive: normalizeSensitiveFlag(req.body),
           createdBy: ownerId,
         },
       });
@@ -1540,12 +2209,31 @@ appRoutes.post(
               typeof req.body.expense.memo === "string"
                 ? req.body.expense.memo
                 : undefined,
+            isSensitive: visit.isSensitive,
             createdBy: ownerId,
           },
         });
         expenseId = expense.id;
+        await writeAuditEvent(tx, {
+          dogId,
+          actorId: ownerId,
+          entityType: "expense",
+          entityId: expense.id,
+          action: "create",
+          summary: expense.vendorName ?? "hospital",
+          metadata: { isSensitive: expense.isSensitive },
+        });
         await recalculateCostForecasts(tx, dogId);
       }
+      await writeAuditEvent(tx, {
+        dogId,
+        actorId: ownerId,
+        entityType: "medical_visit",
+        entityId: visit.id,
+        action: "create",
+        summary: visit.hospitalName,
+        metadata: { isSensitive: visit.isSensitive },
+      });
       return { id: visit.id, expenseId };
     });
     ok(res, result, 201);
@@ -1558,13 +2246,14 @@ appRoutes.get(
     const ownerId = userId(req as AuthedRequest);
     const visitId = parseId(req.params.visitId, "visitId");
     await requireMedicalVisitAccess(ownerId, visitId);
-    ok(
-      res,
-      await prisma.medicalVisit.findUnique({
-        where: { id: visitId },
-        include: { attachments: { orderBy: { createdAt: "desc" } } },
-      }),
-    );
+    const visit = await prisma.medicalVisit.findUnique({
+      where: { id: visitId },
+      include: { attachments: { orderBy: { createdAt: "desc" } } },
+    });
+    if (!visit) throw new HttpError(404, "NOT_FOUND", "medical visit not found");
+    const { role } = await dogAccessContext(ownerId, visit.dogId);
+    const users = await loadDogUserDirectory(visit.dogId, [visit.createdBy]);
+    ok(res, recordResponse(visit, ownerId, role, users));
   }),
 );
 
@@ -1646,47 +2335,57 @@ appRoutes.patch(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const visitId = parseId(req.params.visitId, "visitId");
-    await requireMedicalVisitWriteAccess(ownerId, visitId);
-    ok(
-      res,
-      await prisma.medicalVisit.update({
-        where: { id: visitId },
-        data: {
-          hospitalName:
-            typeof req.body.hospitalName === "string"
-              ? req.body.hospitalName
-              : undefined,
-          veterinarianName:
-            typeof req.body.veterinarianName === "string"
-              ? req.body.veterinarianName
-              : undefined,
-          visitDate: optionalDate(req.body.visitDate),
-          visitReason:
-            typeof req.body.visitReason === "string"
-              ? req.body.visitReason
-              : undefined,
-          symptoms:
-            typeof req.body.symptoms === "string"
-              ? req.body.symptoms
-              : undefined,
-          diagnosis:
-            typeof req.body.diagnosis === "string"
-              ? req.body.diagnosis
-              : undefined,
-          treatment:
-            typeof req.body.treatment === "string"
-              ? req.body.treatment
-              : undefined,
-          prescribedItems:
-            typeof req.body.prescribedItems === "string"
-              ? req.body.prescribedItems
-              : undefined,
-          followUpDate: optionalDate(req.body.followUpDate),
-          notes:
-            typeof req.body.notes === "string" ? req.body.notes : undefined,
-        },
-      }),
-    );
+    const existing = await requireMedicalVisitWriteAccess(ownerId, visitId);
+    const { role } = await dogAccessContext(ownerId, existing.dogId);
+    const visit = await prisma.medicalVisit.update({
+      where: { id: visitId },
+      data: {
+        hospitalName:
+          typeof req.body.hospitalName === "string"
+            ? req.body.hospitalName
+            : undefined,
+        veterinarianName:
+          typeof req.body.veterinarianName === "string"
+            ? req.body.veterinarianName
+            : undefined,
+        visitDate: optionalDate(req.body.visitDate),
+        visitReason:
+          typeof req.body.visitReason === "string"
+            ? req.body.visitReason
+            : undefined,
+        symptoms:
+          typeof req.body.symptoms === "string" ? req.body.symptoms : undefined,
+        diagnosis:
+          typeof req.body.diagnosis === "string"
+            ? req.body.diagnosis
+            : undefined,
+        treatment:
+          typeof req.body.treatment === "string"
+            ? req.body.treatment
+            : undefined,
+        prescribedItems:
+          typeof req.body.prescribedItems === "string"
+            ? req.body.prescribedItems
+            : undefined,
+        followUpDate: optionalDate(req.body.followUpDate),
+        notes: typeof req.body.notes === "string" ? req.body.notes : undefined,
+        isSensitive:
+          req.body.isSensitive === undefined
+            ? undefined
+            : normalizeSensitiveFlag(req.body),
+      },
+    });
+    await writeAuditEvent(prisma, {
+      dogId: existing.dogId,
+      actorId: ownerId,
+      entityType: "medical_visit",
+      entityId: visit.id,
+      action: "update",
+      summary: visit.hospitalName,
+      metadata: { isSensitive: visit.isSensitive },
+    });
+    const users = await loadDogUserDirectory(existing.dogId, [visit.createdBy]);
+    ok(res, recordResponse(visit, ownerId, role, users));
   }),
 );
 
@@ -1706,6 +2405,15 @@ appRoutes.delete(
       });
       await tx.medicalVisit.delete({ where: { id: visitId } });
       await recalculateCostForecasts(tx, existing.dogId);
+      await writeAuditEvent(tx, {
+        dogId: existing.dogId,
+        actorId: ownerId,
+        entityType: "medical_visit",
+        entityId: visitId,
+        action: "delete",
+        summary: existing.hospitalName,
+        metadata: { isSensitive: existing.isSensitive },
+      });
     });
     await Promise.all(
       attachments.map((attachment) => deleteAttachmentFile(attachment.fileUrl)),
@@ -1719,10 +2427,11 @@ appRoutes.get(
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
-    await requireDogAccess(ownerId, dogId);
+    const { role } = await dogAccessContext(ownerId, dogId);
     const { page, pageSize, skip } = parsePaging(req as AuthedRequest);
     const where = {
       dogId,
+      ...sensitiveRecordWhere(role, ownerId),
       expenseCategory:
         typeof req.query.category === "string" ? req.query.category : undefined,
       expenseDate: {
@@ -1743,7 +2452,16 @@ appRoutes.get(
       }),
       prisma.expense.count({ where }),
     ]);
-    ok(res, { items, page, pageSize, total });
+    const users = await loadDogUserDirectory(
+      dogId,
+      items.map((item) => item.createdBy),
+    );
+    ok(res, {
+      items: items.map((item) => recordResponse(item, ownerId, role, users)),
+      page,
+      pageSize,
+      total,
+    });
   }),
 );
 
@@ -1753,6 +2471,7 @@ appRoutes.post(
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
     await requireDogWriteAccess(ownerId, dogId);
+    const { role } = await dogAccessContext(ownerId, dogId);
     const expense = await prisma.expense.create({
       data: {
         dogId,
@@ -1770,11 +2489,22 @@ appRoutes.post(
             ? req.body.vendorName
             : undefined,
         memo: typeof req.body.memo === "string" ? req.body.memo : undefined,
+        isSensitive: normalizeSensitiveFlag(req.body),
         createdBy: ownerId,
       },
     });
     await recalculateCostForecasts(prisma, dogId);
-    ok(res, expense, 201);
+    await writeAuditEvent(prisma, {
+      dogId,
+      actorId: ownerId,
+      entityType: "expense",
+      entityId: expense.id,
+      action: "create",
+      summary: expense.vendorName ?? expense.expenseCategory,
+      metadata: { isSensitive: expense.isSensitive },
+    });
+    const users = await loadDogUserDirectory(dogId, [expense.createdBy]);
+    ok(res, recordResponse(expense, ownerId, role, users), 201);
   }),
 );
 
@@ -1784,12 +2514,17 @@ appRoutes.get(
     const ownerId = userId(req as AuthedRequest);
     const dogId = parseId(req.params.dogId, "dogId");
     await requireDogAccess(ownerId, dogId);
+    const { role } = await dogAccessContext(ownerId, dogId);
     const year = Number(req.query.year ?? new Date().getFullYear());
     const month = Number(req.query.month ?? new Date().getMonth() + 1);
     const start = new Date(year, month - 1, 1);
     const end = new Date(year, month, 0);
     const expenses = await prisma.expense.findMany({
-      where: { dogId, expenseDate: { gte: start, lte: end } },
+      where: {
+        dogId,
+        ...sensitiveRecordWhere(role, ownerId),
+        expenseDate: { gte: start, lte: end },
+      },
     });
     const byCategory = Object.values(
       expenses.reduce<Record<string, { category: string; amount: number }>>(
@@ -1814,13 +2549,16 @@ appRoutes.get(
 appRoutes.get(
   "/expenses/:expenseId",
   asyncHandler(async (req, res) => {
-    ok(
-      res,
-      await requireExpenseAccess(
-        userId(req as AuthedRequest),
-        parseId(req.params.expenseId, "expenseId"),
-      ),
+    const ownerId = userId(req as AuthedRequest);
+    const expense = await requireExpenseAccess(
+      ownerId,
+      parseId(req.params.expenseId, "expenseId"),
     );
+    const { role } = await dogAccessContext(ownerId, expense.dogId);
+    const users = await loadDogUserDirectory(expense.dogId, [
+      expense.createdBy,
+    ]);
+    ok(res, recordResponse(expense, ownerId, role, users));
   }),
 );
 
@@ -1830,6 +2568,7 @@ appRoutes.patch(
     const ownerId = userId(req as AuthedRequest);
     const expenseId = parseId(req.params.expenseId, "expenseId");
     const existing = await requireExpenseWriteAccess(ownerId, expenseId);
+    const { role } = await dogAccessContext(ownerId, existing.dogId);
     const expense = await prisma.expense.update({
       where: { id: expenseId },
       data: {
@@ -1845,10 +2584,26 @@ appRoutes.patch(
             ? req.body.vendorName
             : undefined,
         memo: typeof req.body.memo === "string" ? req.body.memo : undefined,
+        isSensitive:
+          req.body.isSensitive === undefined
+            ? undefined
+            : normalizeSensitiveFlag(req.body),
       },
     });
     await recalculateCostForecasts(prisma, existing.dogId);
-    ok(res, expense);
+    await writeAuditEvent(prisma, {
+      dogId: existing.dogId,
+      actorId: ownerId,
+      entityType: "expense",
+      entityId: expense.id,
+      action: "update",
+      summary: expense.vendorName ?? expense.expenseCategory,
+      metadata: { isSensitive: expense.isSensitive },
+    });
+    const users = await loadDogUserDirectory(existing.dogId, [
+      expense.createdBy,
+    ]);
+    ok(res, recordResponse(expense, ownerId, role, users));
   }),
 );
 
@@ -1860,6 +2615,15 @@ appRoutes.delete(
     const existing = await requireExpenseWriteAccess(ownerId, expenseId);
     await prisma.expense.delete({ where: { id: expenseId } });
     await recalculateCostForecasts(prisma, existing.dogId);
+    await writeAuditEvent(prisma, {
+      dogId: existing.dogId,
+      actorId: ownerId,
+      entityType: "expense",
+      entityId: expenseId,
+      action: "delete",
+      summary: existing.vendorName ?? existing.expenseCategory,
+      metadata: { isSensitive: existing.isSensitive },
+    });
     ok(res, { deleted: true });
   }),
 );
@@ -1934,9 +2698,7 @@ appRoutes.get(
     });
     ok(
       res,
-      report
-        ? { ...report, summary: report.summaryJson, notice: visitReportNotice }
-        : null,
+      visitReportResponse(report),
     );
   }),
 );
@@ -1957,7 +2719,7 @@ appRoutes.get(
       }),
       prisma.visitReport.count({ where: { dogId } }),
     ]);
-    ok(res, { items, page, pageSize, total });
+    ok(res, { items: items.map(visitReportResponse), page, pageSize, total });
   }),
 );
 
@@ -1972,10 +2734,6 @@ appRoutes.get(
     if (!report)
       throw new HttpError(404, "NOT_FOUND", "visit report not found");
     await requireDogAccess(ownerId, report.dogId);
-    ok(res, {
-      ...report,
-      summary: report.summaryJson,
-      notice: visitReportNotice,
-    });
+    ok(res, visitReportResponse(report));
   }),
 );

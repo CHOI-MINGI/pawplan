@@ -2565,6 +2565,45 @@ appRoutes.get(
 );
 
 appRoutes.get(
+  "/dogs/:dogId/expenses/stats",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const dogId = parseId(req.params.dogId, "dogId");
+    await requireDogAccess(ownerId, dogId);
+    const { role } = await dogAccessContext(ownerId, dogId);
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const weekStart = new Date(todayStart);
+    weekStart.setDate(weekStart.getDate() - now.getDay());
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const threeMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 2, 1);
+    const expenses = await prisma.expense.findMany({
+      where: { dogId, ...sensitiveRecordWhere(role, ownerId), expenseDate: { gte: threeMonthsAgo } },
+    });
+    const sumAmount = (exps: typeof expenses) => exps.reduce((s, e) => s + Number(e.amount), 0);
+    const todayTotal = sumAmount(expenses.filter((e) => new Date(e.expenseDate) >= todayStart));
+    const weekTotal = sumAmount(expenses.filter((e) => new Date(e.expenseDate) >= weekStart));
+    const monthExpenses = expenses.filter((e) => new Date(e.expenseDate) >= monthStart);
+    const monthTotal = sumAmount(monthExpenses);
+    const catMap: Record<string, number> = {};
+    for (const e of monthExpenses) {
+      catMap[e.expenseCategory] = (catMap[e.expenseCategory] ?? 0) + Number(e.amount);
+    }
+    const byCategory = Object.entries(catMap)
+      .map(([category, amount]) => ({ category, amount, ratio: monthTotal > 0 ? amount / monthTotal : 0 }))
+      .sort((a, b) => b.amount - a.amount);
+    const monthlyTotals = [];
+    for (let i = 2; i >= 0; i--) {
+      const ms = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const me = new Date(now.getFullYear(), now.getMonth() - i + 1, 0);
+      const mExps = expenses.filter((e) => new Date(e.expenseDate) >= ms && new Date(e.expenseDate) <= me);
+      monthlyTotals.push({ year: ms.getFullYear(), month: ms.getMonth() + 1, amount: sumAmount(mExps) });
+    }
+    ok(res, { today: todayTotal, thisWeek: weekTotal, thisMonth: monthTotal, byCategory, monthlyTotals });
+  }),
+);
+
+appRoutes.get(
   "/expenses/:expenseId",
   asyncHandler(async (req, res) => {
     const ownerId = userId(req as AuthedRequest);
@@ -4034,6 +4073,45 @@ appRoutes.get(
       }, {}),
     );
     ok(res, { totalAmount: byCategory.reduce((sum, item) => sum + item.amount, 0), byCategory });
+  }),
+);
+
+appRoutes.get(
+  "/cats/:catId/expenses/stats",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    await requireCatAccess(ownerId, catId);
+    const { role } = await catAccessContext(ownerId, catId);
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const weekStart = new Date(todayStart);
+    weekStart.setDate(weekStart.getDate() - now.getDay());
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const threeMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 2, 1);
+    const expenses = await prisma.catExpense.findMany({
+      where: { catId, ...sensitiveRecordWhere(role, ownerId), expenseDate: { gte: threeMonthsAgo } },
+    });
+    const sumAmount = (exps: typeof expenses) => exps.reduce((s, e) => s + Number(e.amount), 0);
+    const todayTotal = sumAmount(expenses.filter((e) => new Date(e.expenseDate) >= todayStart));
+    const weekTotal = sumAmount(expenses.filter((e) => new Date(e.expenseDate) >= weekStart));
+    const monthExpenses = expenses.filter((e) => new Date(e.expenseDate) >= monthStart);
+    const monthTotal = sumAmount(monthExpenses);
+    const catMap: Record<string, number> = {};
+    for (const e of monthExpenses) {
+      catMap[e.expenseCategory] = (catMap[e.expenseCategory] ?? 0) + Number(e.amount);
+    }
+    const byCategory = Object.entries(catMap)
+      .map(([category, amount]) => ({ category, amount, ratio: monthTotal > 0 ? amount / monthTotal : 0 }))
+      .sort((a, b) => b.amount - a.amount);
+    const monthlyTotals = [];
+    for (let i = 2; i >= 0; i--) {
+      const ms = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const me = new Date(now.getFullYear(), now.getMonth() - i + 1, 0);
+      const mExps = expenses.filter((e) => new Date(e.expenseDate) >= ms && new Date(e.expenseDate) <= me);
+      monthlyTotals.push({ year: ms.getFullYear(), month: ms.getMonth() + 1, amount: sumAmount(mExps) });
+    }
+    ok(res, { today: todayTotal, thisWeek: weekTotal, thisMonth: monthTotal, byCategory, monthlyTotals });
   }),
 );
 

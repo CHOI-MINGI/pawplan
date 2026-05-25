@@ -1009,6 +1009,14 @@ class ApiClient {
     return _pagedList('/cats/$catId/expenses?pageSize=50');
   }
 
+  Future<JsonMap> expenseStats(int dogId) {
+    return _request<JsonMap>('GET', '/dogs/$dogId/expenses/stats');
+  }
+
+  Future<JsonMap> catExpenseStats(int catId) {
+    return _request<JsonMap>('GET', '/cats/$catId/expenses/stats');
+  }
+
   Future<JsonMap> createCatExpense({
     required int catId,
     required String category,

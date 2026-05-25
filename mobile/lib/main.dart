@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -52,6 +53,24 @@ const _scheduleTypeLabels = {
   'grooming': '미용·위생',
   'custom': '기타',
 };
+
+const _bowelTypeLabels = {
+  'normal': '정상',
+  'soft': '무름',
+  'hard': '딱딱',
+  'blood': '혈변',
+  'unknown': '미확인',
+};
+
+Color _bowelTypeColor(String? type) {
+  return switch (type) {
+    'blood' => _danger,
+    'soft' => _expense,
+    'hard' => _textMuted,
+    'normal' => _secondary,
+    _ => _textMuted,
+  };
+}
 
 enum _RootPhase { booting, auth, onboarding, shell }
 
@@ -205,6 +224,9 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
   final List<JsonMap> _catMembers = [];
   final List<JsonMap> _catActivity = [];
 
+  JsonMap? _expenseStats;
+  JsonMap? _catExpenseStats;
+
   JsonMap? get _selectedCat {
     for (final cat in _cats) {
       if (_asInt(cat['id']) == _selectedCatId) return cat;
@@ -349,6 +371,7 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
     _catVisitReports.clear();
     _catMembers.clear();
     _catActivity.clear();
+    _catExpenseStats = null;
   }
 
   void _clearDashboardData() {
@@ -364,6 +387,7 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
     _visitReports.clear();
     _members.clear();
     _activity.clear();
+    _expenseStats = null;
   }
 
   Future<void> _loadDashboard() async {
@@ -381,6 +405,7 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
       _safeLoad(() => widget.apiClient.latestForecast(dogId)),
       _safeLoad(() => widget.apiClient.latestVisitReport(dogId)),
       widget.apiClient.visitReports(dogId),
+      _safeLoad(() => widget.apiClient.expenseStats(dogId)),
     ]);
 
     if (!mounted) return;
@@ -409,6 +434,7 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
       _visitReports
         ..clear()
         ..addAll((results[9] as List<JsonMap>)..sort(_compareByUpdatedAtDesc));
+      _expenseStats = results[10] as JsonMap?;
       final collaboration = _dashboard?['collaboration'] as JsonMap?;
       _members
         ..clear()
@@ -442,6 +468,7 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
       _safeLoad(() => widget.apiClient.latestCatForecast(catId)),
       _safeLoad(() => widget.apiClient.latestCatVisitReport(catId)),
       widget.apiClient.catVisitReports(catId),
+      _safeLoad(() => widget.apiClient.catExpenseStats(catId)),
     ]);
 
     if (!mounted) return;
@@ -470,6 +497,7 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
       _catVisitReports
         ..clear()
         ..addAll((results[9] as List<JsonMap>)..sort(_compareByUpdatedAtDesc));
+      _catExpenseStats = results[10] as JsonMap?;
       final collaboration = _catDashboard?['collaboration'] as JsonMap?;
       _catMembers
         ..clear()
@@ -707,6 +735,22 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
   Future<void> _deleteHealthLog(int logId) async {
     await _runBusy(() async {
       await widget.apiClient.deleteHealthLog(logId);
+      await _loadDashboard();
+    });
+  }
+
+  Future<void> _createBowelLog(String bowelType) async {
+    final dogId = _selectedDogId;
+    if (dogId == null) return;
+    await _runBusy(() async {
+      await widget.apiClient.createHealthLog(
+        dogId: dogId,
+        logType: 'bowel',
+        title: '배변 기록',
+        memo: '',
+        recordedAt: DateTime.now().toIso8601String(),
+        metadata: {'bowelType': bowelType},
+      );
       await _loadDashboard();
     });
   }
@@ -1090,6 +1134,22 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
   Future<void> _deleteCatHealthLog(int logId) async {
     await _runBusy(() async {
       await widget.apiClient.deleteCatHealthLog(logId);
+      await _loadCatDashboard();
+    });
+  }
+
+  Future<void> _createCatBowelLog(String bowelType) async {
+    final catId = _selectedCatId;
+    if (catId == null) return;
+    await _runBusy(() async {
+      await widget.apiClient.createCatHealthLog(
+        catId: catId,
+        logType: 'bowel',
+        title: '배변 기록',
+        memo: '',
+        recordedAt: DateTime.now().toIso8601String(),
+        metadata: {'bowelType': bowelType},
+      );
       await _loadCatDashboard();
     });
   }
@@ -1501,6 +1561,7 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
     final currentLatestReport = isCat ? _catLatestReport : _latestReport;
     final currentMembers = isCat ? _catMembers : _members;
     final currentActivity = isCat ? _catActivity : _activity;
+    final currentExpenseStats = isCat ? _catExpenseStats : _expenseStats;
 
     final access = (currentDashboard?['access'] as JsonMap?) ?? const {};
     final canEditRecords =
@@ -1663,6 +1724,7 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
                 healthLogs: currentHealthLogs,
                 expenses: currentExpenses,
                 visits: currentVisits,
+                expenseStats: currentExpenseStats,
                 canEditRecords: canEditRecords,
                 onRefresh: _refreshShell,
                 onEditHealth: (item) =>
@@ -1679,6 +1741,8 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
               _DashboardTab.health => _HealthTab(
                 conditions: currentConditions,
                 medications: currentMedications,
+                healthLogs: currentHealthLogs,
+                targetWeightKg: _asNum(petProfile?['targetWeightKg']),
                 canEditRecords: canEditRecords,
                 onRefresh: _refreshShell,
                 onCreateCondition: () => _openCurrentPetConditionEditor(),
@@ -1691,6 +1755,11 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
                     _openCurrentPetMedicationEditor(existing: item),
                 onDeleteMedication:
                     isCat ? _deleteCatMedication : _deleteMedication,
+                onCreateBowelLog: isCat
+                    ? _createCatBowelLog
+                    : _createBowelLog,
+                onDeleteBowelLog:
+                    isCat ? _deleteCatHealthLog : _deleteHealthLog,
               ),
               _DashboardTab.reports => _ReportsTab(
                 forecast: currentForecast,
@@ -2313,11 +2382,13 @@ class _RecordsTab extends StatelessWidget {
     required this.onDeleteExpense,
     required this.onEditVisit,
     required this.onDeleteVisit,
+    this.expenseStats,
   });
 
   final List<JsonMap> healthLogs;
   final List<JsonMap> expenses;
   final List<JsonMap> visits;
+  final JsonMap? expenseStats;
   final bool canEditRecords;
   final Future<void> Function() onRefresh;
   final Future<void> Function(JsonMap item) onEditHealth;
@@ -2370,28 +2441,33 @@ class _RecordsTab extends StatelessWidget {
               const SizedBox(height: 16),
               _RecordsSection(
                 title: '지출',
-                children: expenses.isEmpty
-                    ? const [_EmptyLine('지출 기록이 아직 없습니다.')]
-                    : expenses
-                          .map(
-                            (item) => _MenuRecordCard(
-                              title: item['vendorName'] as String? ?? '지출',
-                              subtitle:
-                                  '${_won(item['amount'])} · ${_formatDate(item['expenseDate'] as String?)}',
-                              icon: Icons.payments_outlined,
-                              color: _expense,
-                              collaboration: item['collaboration'] as JsonMap?,
-                              canEdit: canEditRecords,
-                              menuKey: ValueKey('expense-menu-${item['id']}'),
-                              onEdit: () => onEditExpense(item),
-                              onDelete: () {
-                                final id = _asInt(item['id']);
-                                if (id != null) return onDeleteExpense(id);
-                                return Future<void>.value();
-                              },
-                            ),
-                          )
-                          .toList(),
+                children: [
+                  if (expenseStats != null) ...[
+                    _ExpenseStatsSection(stats: expenseStats!),
+                    const SizedBox(height: 12),
+                  ],
+                  if (expenses.isEmpty)
+                    const _EmptyLine('지출 기록이 아직 없습니다.')
+                  else
+                    ...expenses.map(
+                      (item) => _MenuRecordCard(
+                        title: item['vendorName'] as String? ?? '지출',
+                        subtitle:
+                            '${_won(item['amount'])} · ${_formatDate(item['expenseDate'] as String?)}',
+                        icon: Icons.payments_outlined,
+                        color: _expense,
+                        collaboration: item['collaboration'] as JsonMap?,
+                        canEdit: canEditRecords,
+                        menuKey: ValueKey('expense-menu-${item['id']}'),
+                        onEdit: () => onEditExpense(item),
+                        onDelete: () {
+                          final id = _asInt(item['id']);
+                          if (id != null) return onDeleteExpense(id);
+                          return Future<void>.value();
+                        },
+                      ),
+                    ),
+                ],
               ),
               const SizedBox(height: 16),
               _RecordsSection(
@@ -2435,6 +2511,7 @@ class _HealthTab extends StatelessWidget {
   const _HealthTab({
     required this.conditions,
     required this.medications,
+    required this.healthLogs,
     required this.canEditRecords,
     required this.onRefresh,
     required this.onCreateCondition,
@@ -2443,10 +2520,15 @@ class _HealthTab extends StatelessWidget {
     required this.onCreateMedication,
     required this.onEditMedication,
     required this.onDeleteMedication,
+    required this.onCreateBowelLog,
+    required this.onDeleteBowelLog,
+    this.targetWeightKg,
   });
 
   final List<JsonMap> conditions;
   final List<JsonMap> medications;
+  final List<JsonMap> healthLogs;
+  final num? targetWeightKg;
   final bool canEditRecords;
   final Future<void> Function() onRefresh;
   final Future<void> Function() onCreateCondition;
@@ -2455,9 +2537,31 @@ class _HealthTab extends StatelessWidget {
   final Future<void> Function() onCreateMedication;
   final Future<void> Function(JsonMap item) onEditMedication;
   final Future<void> Function(int id) onDeleteMedication;
+  final Future<void> Function(String bowelType) onCreateBowelLog;
+  final Future<void> Function(int id) onDeleteBowelLog;
+
+  void _openBowelSheet(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => _BowelTypeSheet(
+        onSelect: (type) {
+          Navigator.of(ctx).pop();
+          onCreateBowelLog(type);
+        },
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
+    final bowelLogs = healthLogs
+        .where((log) => log['logType'] == 'bowel')
+        .toList()
+      ..sort(_compareByEventDateDesc);
+
     return _ScrollableTab(
       onRefresh: onRefresh,
       slivers: [
@@ -2485,11 +2589,110 @@ class _HealthTab extends StatelessWidget {
                             color: _health,
                             onTap: onCreateMedication,
                           ),
+                          _ActionPill(
+                            key: const ValueKey('bowel-create-open'),
+                            label: '배변 기록',
+                            icon: Icons.water_drop_outlined,
+                            color: _secondary,
+                            onTap: () async => _openBowelSheet(context),
+                          ),
                         ],
                       )
                     : const _EmptyLine(
                         '보기 권한으로 참여 중입니다. 건강 정보 수정은 owner/editor만 가능합니다.',
                       ),
+              ),
+              const SizedBox(height: 16),
+              _WeightGraph(
+                healthLogs: healthLogs,
+                targetWeightKg: targetWeightKg,
+              ),
+              const SizedBox(height: 16),
+              _RecordsSection(
+                title: '배변 기록',
+                children: bowelLogs.isEmpty
+                    ? const [_EmptyLine('배변 기록이 아직 없습니다.')]
+                    : bowelLogs.map((item) {
+                        final meta = item['metadata'] as JsonMap?;
+                        final bowelType = meta?['bowelType'] as String?;
+                        final isBlood = bowelType == 'blood';
+                        final typeLabel =
+                            _bowelTypeLabels[bowelType] ?? '미확인';
+                        final color = _bowelTypeColor(bowelType);
+                        return Container(
+                          margin: const EdgeInsets.only(bottom: 10),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 12,
+                          ),
+                          decoration: BoxDecoration(
+                            color: isBlood
+                                ? _danger.withValues(alpha: 0.06)
+                                : _surfaceSoft,
+                            borderRadius: BorderRadius.circular(18),
+                            border: isBlood
+                                ? Border.all(
+                                    color: _danger.withValues(alpha: 0.3),
+                                  )
+                                : null,
+                          ),
+                          child: Row(
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 4,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: color.withValues(alpha: 0.15),
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: Text(
+                                  typeLabel,
+                                  style: TextStyle(
+                                    color: color,
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  _formatDate(
+                                    item['recordedAt'] as String?,
+                                  ),
+                                  style: const TextStyle(color: _textMuted),
+                                ),
+                              ),
+                              if (isBlood)
+                                const Padding(
+                                  padding: EdgeInsets.only(right: 6),
+                                  child: Icon(
+                                    Icons.warning_amber_rounded,
+                                    color: _danger,
+                                    size: 18,
+                                  ),
+                                ),
+                              if (canEditRecords)
+                                GestureDetector(
+                                  onTap: () {
+                                    final id = _asInt(item['id']);
+                                    if (id != null) onDeleteBowelLog(id);
+                                  },
+                                  child: const Padding(
+                                    padding: EdgeInsets.all(4),
+                                    child: Icon(
+                                      Icons.delete_outline_rounded,
+                                      size: 18,
+                                      color: _textMuted,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        );
+                      }).toList(),
               ),
               const SizedBox(height: 16),
               _RecordsSection(
@@ -2558,6 +2761,505 @@ class _HealthTab extends StatelessWidget {
     );
   }
 }
+
+// ── 체중 그래프 ──────────────────────────────────────────────────────────────
+
+class _WeightGraph extends StatefulWidget {
+  const _WeightGraph({required this.healthLogs, this.targetWeightKg});
+
+  final List<JsonMap> healthLogs;
+  final num? targetWeightKg;
+
+  @override
+  State<_WeightGraph> createState() => _WeightGraphState();
+}
+
+class _WeightGraphState extends State<_WeightGraph> {
+  int _rangeDays = 30;
+
+  List<MapEntry<DateTime, double>> _filteredPoints() {
+    final now = DateTime.now();
+    final cutoff = DateTime(now.year, now.month, now.day)
+        .subtract(Duration(days: _rangeDays));
+    return widget.healthLogs
+        .where((log) {
+          if (log['logType'] != 'weight') return false;
+          final date = DateTime.tryParse(log['recordedAt'] as String? ?? '');
+          return date != null && !date.isBefore(cutoff);
+        })
+        .map((log) {
+          final date = DateTime.parse(log['recordedAt'] as String);
+          final value = _asNum(log['valueNumeric'])?.toDouble() ?? 0.0;
+          return MapEntry(date, value);
+        })
+        .toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final points = _filteredPoints();
+    return _SectionCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '체중 변화',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              for (final entry in [
+                (30, '30일'),
+                (90, '3개월'),
+                (180, '6개월'),
+              ])
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: ChoiceChip(
+                    label: Text(entry.$2),
+                    selected: _rangeDays == entry.$1,
+                    onSelected: (_) =>
+                        setState(() => _rangeDays = entry.$1),
+                    visualDensity: VisualDensity.compact,
+                    selectedColor: _health.withValues(alpha: 0.2),
+                    labelStyle: TextStyle(
+                      fontSize: 12,
+                      color: _rangeDays == entry.$1 ? _health : _textMuted,
+                      fontWeight: _rangeDays == entry.$1
+                          ? FontWeight.w700
+                          : FontWeight.normal,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          if (points.isEmpty)
+            const _EmptyLine(
+              '체중 기록이 없습니다. 건강 로그에서 weight 타입으로 추가해주세요.',
+            )
+          else
+            SizedBox(
+              height: 160,
+              child: CustomPaint(
+                painter: _WeightChartPainter(
+                  points: points,
+                  targetKg: widget.targetWeightKg?.toDouble(),
+                ),
+                size: const Size(double.infinity, 160),
+              ),
+            ),
+          if (widget.targetWeightKg != null) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Container(
+                  width: 20,
+                  height: 1.5,
+                  color: _expense.withValues(alpha: 0.7),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  '목표 ${widget.targetWeightKg!.toStringAsFixed(1)}kg',
+                  style: const TextStyle(fontSize: 11, color: _textMuted),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _WeightChartPainter extends CustomPainter {
+  const _WeightChartPainter({required this.points, this.targetKg});
+
+  final List<MapEntry<DateTime, double>> points;
+  final double? targetKg;
+
+  static const _leftPad = 40.0;
+  static const _rightPad = 8.0;
+  static const _topPad = 12.0;
+  static const _bottomPad = 20.0;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (points.isEmpty) return;
+
+    final chartW = size.width - _leftPad - _rightPad;
+    final chartH = size.height - _topPad - _bottomPad;
+
+    final values = points.map((e) => e.value).toList();
+    if (targetKg != null) values.add(targetKg!);
+    final minVal = values.reduce((a, b) => a < b ? a : b);
+    final maxVal = values.reduce((a, b) => a > b ? a : b);
+    final range = (maxVal - minVal).clamp(0.5, double.infinity);
+    final yMin = minVal - range * 0.15;
+    final yMax = maxVal + range * 0.15;
+    final yRange = yMax - yMin;
+
+    final startMs = points.first.key.millisecondsSinceEpoch.toDouble();
+    final endMs = points.last.key.millisecondsSinceEpoch.toDouble();
+    final xRange = (endMs - startMs).clamp(1.0, double.infinity);
+
+    double toX(DateTime d) {
+      if (points.length == 1) return _leftPad + chartW / 2;
+      return _leftPad +
+          (d.millisecondsSinceEpoch - startMs) / xRange * chartW;
+    }
+
+    double toY(double val) {
+      return _topPad + chartH - (val - yMin) / yRange * chartH;
+    }
+
+    final gridPaint = Paint()
+      ..color = const Color(0xFFE7CEC3).withValues(alpha: 0.5)
+      ..strokeWidth = 0.5;
+    for (int i = 0; i <= 3; i++) {
+      final y = _topPad + chartH / 3 * i;
+      canvas.drawLine(Offset(_leftPad, y), Offset(_leftPad + chartW, y), gridPaint);
+    }
+
+    if (targetKg != null) {
+      final ty = toY(targetKg!);
+      final dashPaint = Paint()
+        ..color = const Color(0xFFE3B65C).withValues(alpha: 0.8)
+        ..strokeWidth = 1.5;
+      double x = _leftPad;
+      while (x < _leftPad + chartW) {
+        final x2 = (x + 5).clamp(0.0, _leftPad + chartW);
+        canvas.drawLine(Offset(x, ty), Offset(x2, ty), dashPaint);
+        x += 9;
+      }
+    }
+
+    final linePaint = Paint()
+      ..color = const Color(0xFF7BA7CC)
+      ..strokeWidth = 2.0
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    final path = Path();
+    for (int i = 0; i < points.length; i++) {
+      final x = toX(points[i].key);
+      final y = toY(points[i].value);
+      if (i == 0) {
+        path.moveTo(x, y);
+      } else {
+        path.lineTo(x, y);
+      }
+    }
+    canvas.drawPath(path, linePaint);
+
+    final dotFill = Paint()
+      ..color = const Color(0xFF7BA7CC)
+      ..style = PaintingStyle.fill;
+    final dotBorder = Paint()
+      ..color = const Color(0xFFFFFFFF)
+      ..style = PaintingStyle.fill;
+    for (final p in points) {
+      final x = toX(p.key);
+      final y = toY(p.value);
+      canvas.drawCircle(Offset(x, y), 4.0, dotBorder);
+      canvas.drawCircle(Offset(x, y), 2.5, dotFill);
+    }
+
+    final tp = TextPainter(textDirection: ui.TextDirection.ltr);
+    for (int i = 0; i <= 3; i++) {
+      final val = yMax - (yRange / 3) * i;
+      tp.text = TextSpan(
+        text: val.toStringAsFixed(1),
+        style: const TextStyle(color: Color(0xFF6D5D57), fontSize: 9),
+      );
+      tp.layout();
+      tp.paint(canvas, Offset(0, _topPad + chartH / 3 * i - 5));
+    }
+  }
+
+  @override
+  bool shouldRepaint(_WeightChartPainter old) =>
+      old.points != points || old.targetKg != targetKg;
+}
+
+// ── 지출 통계 섹션 ───────────────────────────────────────────────────────────
+
+class _ExpenseStatsSection extends StatelessWidget {
+  const _ExpenseStatsSection({required this.stats});
+
+  final JsonMap stats;
+
+  @override
+  Widget build(BuildContext context) {
+    final today = _asNum(stats['today']) ?? 0;
+    final thisWeek = _asNum(stats['thisWeek']) ?? 0;
+    final thisMonth = _asNum(stats['thisMonth']) ?? 0;
+    final byCategory = _jsonMapList(stats['byCategory']);
+    final monthlyTotals = _jsonMapList(stats['monthlyTotals']);
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: _expense.withValues(alpha: 0.07),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '지출 통계',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: _ExpenseStatCell(label: '오늘', value: _won(today)),
+              ),
+              Expanded(
+                child: _ExpenseStatCell(
+                  label: '이번주',
+                  value: _won(thisWeek),
+                ),
+              ),
+              Expanded(
+                child: _ExpenseStatCell(
+                  label: '이번달',
+                  value: _won(thisMonth),
+                ),
+              ),
+            ],
+          ),
+          if (byCategory.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            const Text(
+              '카테고리별 (이번달)',
+              style: TextStyle(fontSize: 11, color: _textMuted),
+            ),
+            const SizedBox(height: 6),
+            ...byCategory.take(5).map((cat) {
+              final catKey = cat['category'] as String? ?? '';
+              final label = _expenseCategoryLabels[catKey] ?? catKey;
+              final ratio =
+                  (_asNum(cat['ratio']) ?? 0.0).toDouble().clamp(0.0, 1.0);
+              final amount = _asNum(cat['amount']) ?? 0;
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 5),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 56,
+                      child: Text(
+                        label,
+                        style: const TextStyle(fontSize: 11),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(3),
+                        child: LinearProgressIndicator(
+                          value: ratio,
+                          backgroundColor:
+                              const Color(0xFFE7CEC3).withValues(alpha: 0.5),
+                          color: _expense,
+                          minHeight: 6,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      _won(amount),
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }),
+          ],
+          if (monthlyTotals.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            const Text(
+              '최근 3개월',
+              style: TextStyle(fontSize: 11, color: _textMuted),
+            ),
+            const SizedBox(height: 6),
+            SizedBox(
+              height: 72,
+              child: _MonthlyBarChart(months: monthlyTotals),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ExpenseStatCell extends StatelessWidget {
+  const _ExpenseStatCell({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Text(
+          label,
+          style: const TextStyle(fontSize: 10, color: _textMuted),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          value,
+          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+          textAlign: TextAlign.center,
+        ),
+      ],
+    );
+  }
+}
+
+class _MonthlyBarChart extends StatelessWidget {
+  const _MonthlyBarChart({required this.months});
+
+  final List<JsonMap> months;
+
+  @override
+  Widget build(BuildContext context) {
+    final amounts = months
+        .map((m) => _asNum(m['amount'])?.toDouble() ?? 0.0)
+        .toList();
+    final maxAmt = amounts.fold(0.0, (a, b) => a > b ? a : b);
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        for (int i = 0; i < months.length; i++)
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  Text(
+                    _won(amounts[i]),
+                    style:
+                        const TextStyle(fontSize: 9, color: _textMuted),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 3),
+                  Container(
+                    height: maxAmt > 0
+                        ? (amounts[i] / maxAmt * 40).clamp(3.0, 40.0)
+                        : 3.0,
+                    decoration: BoxDecoration(
+                      color: _expense.withValues(
+                        alpha: 0.5 + 0.5 * i / (months.length - 1).clamp(1, 999),
+                      ),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    '${months[i]['month']}월',
+                    style: const TextStyle(
+                      fontSize: 10,
+                      color: _textMuted,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+// ── 배변 타입 선택 바텀시트 ──────────────────────────────────────────────────
+
+class _BowelTypeSheet extends StatelessWidget {
+  const _BowelTypeSheet({required this.onSelect});
+
+  final void Function(String type) onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '배변 상태 선택',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 16),
+            ...(_bowelTypeLabels.entries.map((entry) {
+              final color = _bowelTypeColor(entry.key);
+              return InkWell(
+                borderRadius: BorderRadius.circular(16),
+                onTap: () => onSelect(entry.key),
+                child: Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 18,
+                    vertical: 14,
+                  ),
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: color.withValues(alpha: 0.3)),
+                  ),
+                  child: Row(
+                    children: [
+                      Text(
+                        entry.value,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          color: color,
+                          fontSize: 16,
+                        ),
+                      ),
+                      if (entry.key == 'blood') ...[
+                        const SizedBox(width: 8),
+                        const Icon(
+                          Icons.warning_amber_rounded,
+                          color: _danger,
+                          size: 16,
+                        ),
+                        const SizedBox(width: 4),
+                        const Text(
+                          '수의사 상담 권장',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: _danger,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              );
+            })),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── ReportsTab ───────────────────────────────────────────────────────────────
 
 class _ReportsTab extends StatelessWidget {
   const _ReportsTab({

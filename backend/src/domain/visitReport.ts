@@ -507,3 +507,181 @@ export async function buildVisitReport(tx: Tx, dogId: bigint, userId: bigint) {
     },
   });
 }
+
+export async function buildCatVisitReport(tx: Tx, catId: bigint, userId: bigint) {
+  const now = new Date();
+  const since30 = new Date(now.getTime() - 30 * dayMs);
+  const since90 = new Date(now.getTime() - 90 * dayMs);
+
+  const [cat, healthLogs, weights, medications, conditions, visits] =
+    await Promise.all([
+      tx.cat.findUniqueOrThrow({ where: { id: catId } }),
+      tx.catHealthLog.findMany({
+        where: { catId, recordedAt: { gte: since90 } },
+        orderBy: { recordedAt: "desc" },
+        take: 40,
+      }),
+      tx.catHealthLog.findMany({
+        where: { catId, logType: "weight", valueNumeric: { not: null } },
+        orderBy: { recordedAt: "desc" },
+        take: 12,
+      }),
+      tx.catMedication.findMany({
+        where: { catId, isActive: true },
+        orderBy: { startedOn: "desc" },
+        take: 10,
+      }),
+      tx.catCondition.findMany({
+        where: { catId, status: { in: ["active", "monitoring"] } },
+        orderBy: { updatedAt: "desc" },
+        take: 10,
+      }),
+      tx.catMedicalVisit.findMany({
+        where: { catId },
+        orderBy: { visitDate: "desc" },
+        take: 8,
+      }),
+    ]);
+
+  const symptoms = healthLogs.filter((log) => log.logType === "symptom");
+  const symptoms30 = symptoms.filter((log) => log.recordedAt >= since30);
+  const weights30 = weights.filter((log) => log.recordedAt >= since30);
+  const visits30 = visits.filter((visit) => visit.visitDate >= since30);
+  const medications30 = medications.filter(
+    (m) => m.startedOn && m.startedOn >= since30,
+  );
+  const conditions30 = conditions.filter(
+    (c) => c.diagnosedOn && c.diagnosedOn >= since30,
+  );
+  const trend = weightTrend(weights30.length >= 2 ? weights30 : weights);
+
+  const recentChanges = buildRecentChanges({ symptoms30, weights30, visits30, medications30, conditions30 });
+  const questionList = buildQuestions({ symptoms30, trend, medications, conditions, visits30 });
+  const missingRecords = buildMissingRecords({ symptoms30, weights30, medications, conditions, visits });
+
+  const age = ageYears(cat.birthDate);
+  const latestSymptoms = symptoms.slice(0, 5).map((log) => ({
+    recordedAt: formatDate(log.recordedAt),
+    title: textOrNull(log.title),
+    memo: logLabel(log),
+  }));
+  const activeMedications = medications.map((m) => ({
+    name: m.medicationName,
+    dosage: textOrNull(m.dosage),
+    frequencyText: textOrNull(m.frequencyText),
+    startedOn: formatDate(m.startedOn),
+    notes: textOrNull(m.notes),
+    label: medicationLabel(m),
+  }));
+  const activeConditions = conditions.map((c) => ({
+    type: c.conditionType,
+    name: c.conditionName,
+    severity: textOrNull(c.severity),
+    diagnosedOn: formatDate(c.diagnosedOn),
+    status: c.status,
+    notes: textOrNull(c.notes),
+  }));
+  const recentVisits = visits.map((visit) => ({
+    hospitalName: visit.hospitalName,
+    veterinarianName: textOrNull(visit.veterinarianName),
+    visitDate: formatDate(visit.visitDate),
+    visitReason: textOrNull(visit.visitReason),
+    symptoms: textOrNull(visit.symptoms),
+    diagnosis: textOrNull(visit.diagnosis),
+    treatment: textOrNull(visit.treatment),
+    prescribedItems: textOrNull(visit.prescribedItems),
+    followUpDate: formatDate(visit.followUpDate),
+    notes: textOrNull(visit.notes),
+    label: visitLabel(visit),
+  }));
+
+  const summary = {
+    reportVersion: "cat_vet_visit_summary_v1",
+    generatedAt: now.toISOString(),
+    cat: {
+      name: cat.name,
+      breed: cat.breed,
+      ageYears: age,
+      currentWeightKg: cat.currentWeightKg ? Number(cat.currentWeightKg) : null,
+    },
+    recent30Days: {
+      windowStart: formatDate(since30),
+      windowEnd: formatDate(now),
+      symptomCount: symptoms30.length,
+      visitCount: visits30.length,
+      medicationStartCount: medications30.length,
+      conditionStartCount: conditions30.length,
+      weightTrend: trend,
+      changes: recentChanges,
+    },
+    recentSymptoms: latestSymptoms,
+    weightTrend: trend,
+    activeMedications,
+    conditions: activeConditions,
+    recentVisits,
+    questionList,
+    missingRecords,
+    share: {
+      pdfStatus: "not_generated",
+      pdfUrl: null,
+      sharePath: null,
+      suggestedFilename: `${cat.name}-visit-report-${formatDate(now)}.txt`,
+      shareTextAvailable: true,
+    },
+  };
+
+  const title = `${formatDate(now)} 병원 방문 리포트`;
+  const renderedText = [
+    `${cat.name} / ${cat.breed}${age !== null ? ` / ${age}세` : ""}`,
+    renderSection(
+      "진료 전 핵심 요약",
+      [
+        symptoms30.length
+          ? `최근 30일 증상 ${symptoms30.length}건: ${symptoms30.slice(0, 3).map(logLabel).join(", ")}`
+          : "최근 30일 증상 기록 없음",
+        trend
+          ? `체중 변화: ${trend.previousWeightKg}kg -> ${trend.currentWeightKg}kg (${trend.deltaPct}%)`
+          : "체중 변화 판단에 충분한 기록 없음",
+        visits30.length
+          ? `최근 30일 병원 방문 ${visits30.length}회`
+          : "최근 30일 병원 방문 기록 없음",
+      ],
+    ),
+    renderSection(
+      "수의사에게 물어볼 질문",
+      questionList.map((item) => `${item.question} (${item.reason})`),
+    ),
+    renderSection(
+      "복약/질환",
+      [
+        medications.length
+          ? `복용약: ${activeMedications.map((item) => item.label).join(", ")}`
+          : "현재 복용약 기록 없음",
+        conditions.length
+          ? `주의 정보: ${activeConditions.map((item) => item.name).join(", ")}`
+          : "등록된 알레르기/기저질환 없음",
+      ],
+    ),
+    renderSection(
+      "최근 방문",
+      recentVisits.length
+        ? recentVisits.slice(0, 5).map((visit) => visit.label)
+        : ["최근 병원 방문 기록 없음"],
+    ),
+    renderSection(
+      "누락/확인 필요 기록",
+      missingRecords.map((item) => `${item.title}: ${item.reason}`),
+    ),
+    visitReportNotice,
+  ].join("\n\n");
+
+  return tx.catVisitReport.create({
+    data: {
+      catId,
+      title,
+      summaryJson: summary,
+      renderedText,
+      generatedBy: userId,
+    },
+  });
+}

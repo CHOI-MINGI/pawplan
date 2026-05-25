@@ -656,6 +656,571 @@ class ApiClient {
     return _request<JsonMap?>('GET', '/dogs/$dogId/visit-reports/latest');
   }
 
+  // ── Cat API methods ──────────────────────────────────────────────────────
+
+  Future<List<JsonMap>> cats() async {
+    final data = await _request<List<dynamic>>('GET', '/cats');
+    return data.cast<JsonMap>();
+  }
+
+  Future<JsonMap> onboardCat(JsonMap payload) {
+    return _request<JsonMap>('POST', '/onboarding/cats', body: payload);
+  }
+
+  Future<JsonMap> updateCat({required int catId, required JsonMap payload}) {
+    return _request<JsonMap>('PATCH', '/cats/$catId', body: payload);
+  }
+
+  Future<JsonMap> catDeletePreview(int catId) {
+    return _request<JsonMap>('GET', '/cats/$catId/delete-preview');
+  }
+
+  Future<JsonMap> deleteCat(int catId) {
+    return _request<JsonMap>('DELETE', '/cats/$catId');
+  }
+
+  Future<List<JsonMap>> catMembers(int catId) async {
+    final data = await _request<List<dynamic>>('GET', '/cats/$catId/members');
+    return data.cast<JsonMap>();
+  }
+
+  Future<JsonMap> addCatMember({
+    required int catId,
+    required String email,
+    required String role,
+  }) {
+    return _request<JsonMap>(
+      'POST',
+      '/cats/$catId/members',
+      body: {'email': email, 'role': role},
+    );
+  }
+
+  Future<JsonMap> updateCatMembership({
+    required int membershipId,
+    required String role,
+  }) {
+    return _request<JsonMap>(
+      'PATCH',
+      '/cat-memberships/$membershipId',
+      body: {'role': role},
+    );
+  }
+
+  Future<JsonMap> removeCatMembership(int membershipId) {
+    return _request<JsonMap>('DELETE', '/cat-memberships/$membershipId');
+  }
+
+  Future<JsonMap> catDashboard(int catId) {
+    return _request<JsonMap>('GET', '/cats/$catId/dashboard');
+  }
+
+  Future<List<JsonMap>> catCareSchedules(int catId) async {
+    final data = await _request<List<dynamic>>(
+      'GET',
+      '/cats/$catId/care-schedules?status=pending',
+    );
+    return data.cast<JsonMap>();
+  }
+
+  Future<JsonMap> createCatCareSchedule({
+    required int catId,
+    required String scheduleType,
+    required String title,
+    required String dueDate,
+    required String description,
+    required String priority,
+    int? repeatCycleDays,
+    int? assignedToUserId,
+  }) {
+    final body = <String, dynamic>{
+      'scheduleType': scheduleType,
+      'title': title,
+      'dueDate': dueDate,
+      'description': description,
+      'priority': priority,
+    };
+    if (repeatCycleDays != null) body['repeatCycleDays'] = repeatCycleDays;
+    if (assignedToUserId != null) body['assignedToUserId'] = assignedToUserId;
+    return _request<JsonMap>('POST', '/cats/$catId/care-schedules', body: body);
+  }
+
+  Future<JsonMap> updateCatCareSchedule({
+    required int scheduleId,
+    required String scheduleType,
+    required String title,
+    required String dueDate,
+    required String description,
+    required String priority,
+    required bool reminderEnabled,
+    int? repeatCycleDays,
+    int? assignedToUserId,
+  }) {
+    final body = <String, dynamic>{
+      'scheduleType': scheduleType,
+      'title': title,
+      'dueDate': dueDate,
+      'description': description,
+      'priority': priority,
+      'reminderEnabled': reminderEnabled,
+      'repeatCycleDays': repeatCycleDays,
+    };
+    if (assignedToUserId != null) body['assignedToUserId'] = assignedToUserId;
+    return _request<JsonMap>(
+      'PATCH',
+      '/cat-care-schedules/$scheduleId',
+      body: body,
+    );
+  }
+
+  Future<JsonMap> completeCatSchedule(int scheduleId) {
+    return _request<JsonMap>(
+      'POST',
+      '/cat-care-schedules/$scheduleId/complete',
+    );
+  }
+
+  Future<JsonMap> skipCatSchedule(int scheduleId) {
+    return _request<JsonMap>('POST', '/cat-care-schedules/$scheduleId/skip');
+  }
+
+  Future<List<JsonMap>> catHealthLogs(int catId) async {
+    return _pagedList('/cats/$catId/health-logs?pageSize=50');
+  }
+
+  Future<JsonMap> createCatHealthLog({
+    required int catId,
+    required String logType,
+    required String title,
+    String? memo,
+    String? recordedAt,
+    num? valueNumeric,
+    String? valueUnit,
+    JsonMap? metadata,
+    bool isSensitive = false,
+  }) {
+    final body = <String, dynamic>{'logType': logType, 'title': title};
+    if (memo != null && memo.trim().isNotEmpty) body['memo'] = memo;
+    if (recordedAt != null && recordedAt.trim().isNotEmpty) {
+      body['recordedAt'] = recordedAt;
+    }
+    if (valueNumeric != null) body['valueNumeric'] = valueNumeric;
+    if (valueUnit != null && valueUnit.trim().isNotEmpty) {
+      body['valueUnit'] = valueUnit;
+    }
+    if (metadata != null && metadata.isNotEmpty) body['metadata'] = metadata;
+    body['isSensitive'] = isSensitive;
+    return _request<JsonMap>('POST', '/cats/$catId/health-logs', body: body);
+  }
+
+  Future<JsonMap> updateCatHealthLog({
+    required int logId,
+    required String logType,
+    required String title,
+    required String memo,
+    String? recordedAt,
+    num? valueNumeric,
+    String? valueUnit,
+    JsonMap? metadata,
+    bool? isSensitive,
+  }) {
+    final body = <String, dynamic>{
+      'logType': logType,
+      'title': title,
+      'memo': memo,
+    };
+    if (recordedAt != null && recordedAt.trim().isNotEmpty) {
+      body['recordedAt'] = recordedAt;
+    }
+    if (valueNumeric != null) body['valueNumeric'] = valueNumeric;
+    if (valueUnit?.trim().isNotEmpty ?? false) body['valueUnit'] = valueUnit;
+    if (metadata != null) body['metadata'] = metadata;
+    if (isSensitive != null) body['isSensitive'] = isSensitive;
+    return _request<JsonMap>('PATCH', '/cat-health-logs/$logId', body: body);
+  }
+
+  Future<JsonMap> deleteCatHealthLog(int logId) {
+    return _request<JsonMap>('DELETE', '/cat-health-logs/$logId');
+  }
+
+  Future<List<JsonMap>> catMedicalVisits(int catId) async {
+    return _pagedList('/cats/$catId/medical-visits?pageSize=50');
+  }
+
+  Future<JsonMap> createCatMedicalVisit({
+    required int catId,
+    required String hospitalName,
+    String? veterinarianName,
+    String? visitDate,
+    required String visitReason,
+    required String symptoms,
+    required String diagnosis,
+    required String treatment,
+    required String prescribedItems,
+    required String followUpDate,
+    String? notes,
+    required num? expenseAmount,
+    String? expenseDate,
+    String? expenseMemo,
+    bool isSensitive = false,
+  }) {
+    return _request<JsonMap>(
+      'POST',
+      '/cats/$catId/medical-visits',
+      body: {
+        'hospitalName': hospitalName,
+        if (veterinarianName != null && veterinarianName.trim().isNotEmpty)
+          'veterinarianName': veterinarianName,
+        if (visitDate != null && visitDate.trim().isNotEmpty)
+          'visitDate': visitDate,
+        if (visitReason.trim().isNotEmpty) 'visitReason': visitReason,
+        if (symptoms.trim().isNotEmpty) 'symptoms': symptoms,
+        if (diagnosis.trim().isNotEmpty) 'diagnosis': diagnosis,
+        if (treatment.trim().isNotEmpty) 'treatment': treatment,
+        if (prescribedItems.trim().isNotEmpty)
+          'prescribedItems': prescribedItems,
+        if (followUpDate.trim().isNotEmpty) 'followUpDate': followUpDate,
+        if (notes != null && notes.trim().isNotEmpty) 'notes': notes,
+        'isSensitive': isSensitive,
+        if (expenseAmount != null && expenseAmount > 0)
+          'expense': {
+            'create': true,
+            'amount': expenseAmount,
+            if (expenseDate != null && expenseDate.trim().isNotEmpty)
+              'expenseDate': expenseDate,
+            'vendorName': hospitalName,
+            if (expenseMemo != null && expenseMemo.trim().isNotEmpty)
+              'memo': expenseMemo,
+          },
+      },
+    );
+  }
+
+  Future<JsonMap> updateCatMedicalVisit({
+    required int visitId,
+    required String hospitalName,
+    String? veterinarianName,
+    String? visitDate,
+    required String visitReason,
+    required String symptoms,
+    required String diagnosis,
+    required String treatment,
+    required String prescribedItems,
+    required String followUpDate,
+    required String notes,
+    bool? isSensitive,
+  }) {
+    final body = <String, dynamic>{
+      'hospitalName': hospitalName,
+      if (veterinarianName != null && veterinarianName.trim().isNotEmpty)
+        'veterinarianName': veterinarianName,
+      if (visitDate != null && visitDate.trim().isNotEmpty)
+        'visitDate': visitDate,
+      'visitReason': visitReason,
+      'symptoms': symptoms,
+      'diagnosis': diagnosis,
+      'treatment': treatment,
+      'prescribedItems': prescribedItems,
+      if (followUpDate.trim().isNotEmpty) 'followUpDate': followUpDate,
+      'notes': notes,
+    };
+    if (isSensitive != null) body['isSensitive'] = isSensitive;
+    return _request<JsonMap>(
+      'PATCH',
+      '/cat-medical-visits/$visitId',
+      body: body,
+    );
+  }
+
+  Future<JsonMap> deleteCatMedicalVisit(int visitId) {
+    return _request<JsonMap>('DELETE', '/cat-medical-visits/$visitId');
+  }
+
+  Future<List<JsonMap>> catVisitAttachments(int visitId) async {
+    final data = await _request<List<dynamic>>(
+      'GET',
+      '/cat-medical-visits/$visitId/attachments',
+    );
+    return data.cast<JsonMap>();
+  }
+
+  Future<JsonMap> uploadCatVisitAttachment({
+    required int visitId,
+    required String fileType,
+    required String filename,
+    required Uint8List bytes,
+  }) async {
+    final uri = Uri.parse(
+      '${baseUrl.replaceAll(RegExp(r'/$'), '')}/cat-medical-visits/$visitId/attachments',
+    );
+    final request = http.MultipartRequest('POST', uri)
+      ..headers.addAll({
+        'Accept': 'application/json',
+        if (_accessToken != null) 'Authorization': 'Bearer $_accessToken',
+      })
+      ..fields['fileType'] = fileType
+      ..files.add(
+        http.MultipartFile.fromBytes('file', bytes, filename: filename),
+      );
+
+    try {
+      final streamed = await _http.send(request);
+      final response = await http.Response.fromStream(streamed);
+      return _decodeResponse<JsonMap>(response);
+    } on http.ClientException {
+      throw ApiException(
+        'API 서버 연결에 실패했습니다. 백엔드 서버와 API 주소를 확인하세요. ($baseUrl)',
+        code: 'NETWORK_ERROR',
+      );
+    }
+  }
+
+  Future<Uint8List> downloadCatAttachment(int attachmentId) async {
+    final uri = Uri.parse(
+      '${baseUrl.replaceAll(RegExp(r'/$'), '')}/cat-attachments/$attachmentId/download',
+    );
+    try {
+      final response = await _http.get(
+        uri,
+        headers: {
+          if (_accessToken != null) 'Authorization': 'Bearer $_accessToken',
+        },
+      );
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw ApiException(
+          '첨부파일 다운로드에 실패했습니다.',
+          statusCode: response.statusCode,
+        );
+      }
+      return response.bodyBytes;
+    } on http.ClientException {
+      throw ApiException(
+        'API 서버 연결에 실패했습니다. 백엔드 서버와 API 주소를 확인하세요. ($baseUrl)',
+        code: 'NETWORK_ERROR',
+      );
+    }
+  }
+
+  Future<JsonMap> deleteCatAttachment(int attachmentId) {
+    return _request<JsonMap>('DELETE', '/cat-attachments/$attachmentId');
+  }
+
+  Future<List<JsonMap>> catExpenses(int catId) async {
+    return _pagedList('/cats/$catId/expenses?pageSize=50');
+  }
+
+  Future<JsonMap> createCatExpense({
+    required int catId,
+    required String category,
+    required num amount,
+    String? expenseDate,
+    String? vendorName,
+    String? memo,
+    bool isSensitive = false,
+  }) {
+    return _request<JsonMap>(
+      'POST',
+      '/cats/$catId/expenses',
+      body: {
+        'expenseCategory': category,
+        'amount': amount,
+        if (expenseDate != null && expenseDate.trim().isNotEmpty)
+          'expenseDate': expenseDate,
+        if (vendorName != null && vendorName.trim().isNotEmpty)
+          'vendorName': vendorName,
+        if (memo != null && memo.trim().isNotEmpty) 'memo': memo,
+        'isSensitive': isSensitive,
+      },
+    );
+  }
+
+  Future<JsonMap> updateCatExpense({
+    required int expenseId,
+    required String category,
+    required num amount,
+    required String expenseDate,
+    required String vendorName,
+    required String memo,
+    bool? isSensitive,
+  }) {
+    final body = <String, dynamic>{
+      'expenseCategory': category,
+      'amount': amount,
+      if (expenseDate.trim().isNotEmpty) 'expenseDate': expenseDate,
+      'vendorName': vendorName,
+      'memo': memo,
+    };
+    if (isSensitive != null) body['isSensitive'] = isSensitive;
+    return _request<JsonMap>('PATCH', '/cat-expenses/$expenseId', body: body);
+  }
+
+  Future<JsonMap> deleteCatExpense(int expenseId) {
+    return _request<JsonMap>('DELETE', '/cat-expenses/$expenseId');
+  }
+
+  Future<List<JsonMap>> catConditions(int catId) async {
+    final data = await _request<List<dynamic>>(
+      'GET',
+      '/cats/$catId/conditions',
+    );
+    return data.cast<JsonMap>();
+  }
+
+  Future<JsonMap> createCatCondition({
+    required int catId,
+    required String conditionType,
+    required String conditionName,
+    required String severity,
+    required String diagnosedOn,
+    required String status,
+    required String notes,
+    bool isSensitive = false,
+  }) {
+    return _request<JsonMap>(
+      'POST',
+      '/cats/$catId/conditions',
+      body: {
+        'conditionType': conditionType,
+        'conditionName': conditionName,
+        'severity': severity,
+        'diagnosedOn': diagnosedOn.trim().isEmpty ? null : diagnosedOn,
+        'status': status,
+        'notes': notes,
+        'isSensitive': isSensitive,
+      },
+    );
+  }
+
+  Future<JsonMap> updateCatCondition({
+    required int conditionId,
+    required String conditionType,
+    required String conditionName,
+    required String severity,
+    required String diagnosedOn,
+    required String status,
+    required String notes,
+    bool? isSensitive,
+  }) {
+    final body = <String, dynamic>{
+      'conditionType': conditionType,
+      'conditionName': conditionName,
+      'severity': severity,
+      'diagnosedOn': diagnosedOn.trim().isEmpty ? null : diagnosedOn,
+      'status': status,
+      'notes': notes,
+    };
+    if (isSensitive != null) body['isSensitive'] = isSensitive;
+    return _request<JsonMap>(
+      'PATCH',
+      '/cat-conditions/$conditionId',
+      body: body,
+    );
+  }
+
+  Future<JsonMap> deleteCatCondition(int conditionId) {
+    return _request<JsonMap>('DELETE', '/cat-conditions/$conditionId');
+  }
+
+  Future<List<JsonMap>> catMedications(int catId) async {
+    final data = await _request<List<dynamic>>(
+      'GET',
+      '/cats/$catId/medications',
+    );
+    return data.cast<JsonMap>();
+  }
+
+  Future<JsonMap> createCatMedication({
+    required int catId,
+    required String medicationName,
+    required String dosage,
+    required String frequencyText,
+    required String startedOn,
+    required String endedOn,
+    required String prescribedBy,
+    required bool isActive,
+    required String notes,
+    bool isSensitive = false,
+  }) {
+    return _request<JsonMap>(
+      'POST',
+      '/cats/$catId/medications',
+      body: {
+        'medicationName': medicationName,
+        'dosage': dosage,
+        'frequencyText': frequencyText,
+        'startedOn': startedOn.trim().isEmpty ? null : startedOn,
+        'endedOn': endedOn.trim().isEmpty ? null : endedOn,
+        'prescribedBy': prescribedBy,
+        'isActive': isActive,
+        'notes': notes,
+        'isSensitive': isSensitive,
+      },
+    );
+  }
+
+  Future<JsonMap> updateCatMedication({
+    required int medicationId,
+    required String medicationName,
+    required String dosage,
+    required String frequencyText,
+    required String startedOn,
+    required String endedOn,
+    required String prescribedBy,
+    required bool isActive,
+    required String notes,
+    bool? isSensitive,
+  }) {
+    final body = <String, dynamic>{
+      'medicationName': medicationName,
+      'dosage': dosage,
+      'frequencyText': frequencyText,
+      'startedOn': startedOn.trim().isEmpty ? null : startedOn,
+      'endedOn': endedOn.trim().isEmpty ? null : endedOn,
+      'prescribedBy': prescribedBy,
+      'isActive': isActive,
+      'notes': notes,
+    };
+    if (isSensitive != null) body['isSensitive'] = isSensitive;
+    return _request<JsonMap>(
+      'PATCH',
+      '/cat-medications/$medicationId',
+      body: body,
+    );
+  }
+
+  Future<JsonMap> deleteCatMedication(int medicationId) {
+    return _request<JsonMap>('DELETE', '/cat-medications/$medicationId');
+  }
+
+  Future<JsonMap> latestCatForecast(int catId) {
+    return _request<JsonMap>('GET', '/cats/$catId/cost-forecasts/latest');
+  }
+
+  Future<JsonMap> recalculateCatForecast(int catId) {
+    return _request<JsonMap>(
+      'POST',
+      '/cats/$catId/cost-forecasts/recalculate',
+    );
+  }
+
+  Future<List<JsonMap>> catForecastHistory(int catId) async {
+    return _pagedList('/cats/$catId/cost-forecasts/history?pageSize=30');
+  }
+
+  Future<JsonMap> generateCatVisitReport(int catId) {
+    return _request<JsonMap>('POST', '/cats/$catId/visit-reports');
+  }
+
+  Future<JsonMap?> latestCatVisitReport(int catId) {
+    return _request<JsonMap?>('GET', '/cats/$catId/visit-reports/latest');
+  }
+
+  Future<List<JsonMap>> catVisitReports(int catId) async {
+    return _pagedList('/cats/$catId/visit-reports?pageSize=20');
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+
   Future<List<JsonMap>> _pagedList(String path) async {
     final data = await _request<JsonMap>('GET', path);
     return (data['items'] as List<dynamic>? ?? []).cast<JsonMap>();

@@ -186,6 +186,33 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
     return _dogs.isEmpty ? null : _dogs.first;
   }
 
+  // ── Cat state ────────────────────────────────────────────────────────────
+  String _activePetType = 'dog'; // 'dog' | 'cat'
+
+  final List<JsonMap> _cats = [];
+  int? _selectedCatId;
+
+  JsonMap? _catDashboard;
+  JsonMap? _catForecast;
+  JsonMap? _catLatestReport;
+  final List<JsonMap> _catSchedules = [];
+  final List<JsonMap> _catHealthLogs = [];
+  final List<JsonMap> _catExpenses = [];
+  final List<JsonMap> _catMedicalVisits = [];
+  final List<JsonMap> _catConditions = [];
+  final List<JsonMap> _catMedications = [];
+  final List<JsonMap> _catVisitReports = [];
+  final List<JsonMap> _catMembers = [];
+  final List<JsonMap> _catActivity = [];
+
+  JsonMap? get _selectedCat {
+    for (final cat in _cats) {
+      if (_asInt(cat['id']) == _selectedCatId) return cat;
+    }
+    return _cats.isEmpty ? null : _cats.first;
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   @override
   void initState() {
     super.initState();
@@ -203,7 +230,7 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
     widget.apiClient.setSessionToken(token);
     try {
       await widget.apiClient.me();
-      await _loadDogs(refreshDashboard: true);
+      await _loadAllPets(refreshDashboard: true);
     } catch (_) {
       widget.apiClient.clearSession();
       await widget.sessionStore.clear();
@@ -248,34 +275,80 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
 
   Future<void> _loadDogs({bool refreshDashboard = false}) async {
     final dogs = await widget.apiClient.dogs();
-    final previousDogId = _selectedDogId;
-    final nextDogId = dogs.any((dog) => _asInt(dog['id']) == previousDogId)
-        ? previousDogId
+    final prevId = _selectedDogId;
+    final nextId = dogs.any((d) => _asInt(d['id']) == prevId)
+        ? prevId
         : (dogs.isEmpty ? null : _asInt(dogs.first['id']));
+    if (!mounted) return;
+    setState(() {
+      _dogs..clear()..addAll(dogs);
+      _selectedDogId = nextId;
+    });
+    if (refreshDashboard && nextId != null) await _loadDashboard();
+  }
+
+  Future<void> _loadAllPets({bool refreshDashboard = false}) async {
+    final results = await Future.wait<List<JsonMap>>([
+      widget.apiClient.dogs(),
+      widget.apiClient.cats(),
+    ]);
+    final dogs = results[0];
+    final cats = results[1];
+
+    final prevDogId = _selectedDogId;
+    final nextDogId = dogs.any((d) => _asInt(d['id']) == prevDogId)
+        ? prevDogId
+        : (dogs.isEmpty ? null : _asInt(dogs.first['id']));
+    final prevCatId = _selectedCatId;
+    final nextCatId = cats.any((c) => _asInt(c['id']) == prevCatId)
+        ? prevCatId
+        : (cats.isEmpty ? null : _asInt(cats.first['id']));
 
     if (!mounted) return;
     setState(() {
-      _dogs
-        ..clear()
-        ..addAll(dogs);
+      _dogs..clear()..addAll(dogs);
       _selectedDogId = nextDogId;
+      _cats..clear()..addAll(cats);
+      _selectedCatId = nextCatId;
+      if (dogs.isEmpty && cats.isNotEmpty) _activePetType = 'cat';
+      if (cats.isEmpty && dogs.isNotEmpty) _activePetType = 'dog';
     });
 
-    if (dogs.isEmpty) {
+    if (dogs.isEmpty && cats.isEmpty) {
       if (!mounted) return;
       setState(() {
         _phase = _RootPhase.onboarding;
         _clearDashboardData();
+        _clearCatDashboardData();
       });
       return;
     }
 
     if (refreshDashboard) {
-      await _loadDashboard();
+      if (_activePetType == 'cat' && nextCatId != null) {
+        await _loadCatDashboard();
+      } else if (nextDogId != null) {
+        await _loadDashboard();
+      }
     }
 
     if (!mounted) return;
     setState(() => _phase = _RootPhase.shell);
+  }
+
+  void _clearCatDashboardData() {
+    _catDashboard = null;
+    _catForecast = null;
+    _catLatestReport = null;
+    _catSchedules.clear();
+    _catHealthLogs.clear();
+    _catExpenses.clear();
+    _catMedicalVisits.clear();
+    _catConditions.clear();
+    _catMedications.clear();
+    _catVisitReports.clear();
+    _catMembers.clear();
+    _catActivity.clear();
   }
 
   void _clearDashboardData() {
@@ -354,8 +427,87 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
     await widget.notifications.syncCareReminders(_schedules);
   }
 
+  Future<void> _loadCatDashboard() async {
+    final catId = _selectedCatId;
+    if (catId == null) return;
+
+    final results = await Future.wait<dynamic>([
+      widget.apiClient.catDashboard(catId),
+      widget.apiClient.catCareSchedules(catId),
+      widget.apiClient.catHealthLogs(catId),
+      widget.apiClient.catExpenses(catId),
+      widget.apiClient.catMedicalVisits(catId),
+      widget.apiClient.catConditions(catId),
+      widget.apiClient.catMedications(catId),
+      _safeLoad(() => widget.apiClient.latestCatForecast(catId)),
+      _safeLoad(() => widget.apiClient.latestCatVisitReport(catId)),
+      widget.apiClient.catVisitReports(catId),
+    ]);
+
+    if (!mounted) return;
+    setState(() {
+      _catDashboard = results[0] as JsonMap;
+      _catSchedules
+        ..clear()
+        ..addAll((results[1] as List<JsonMap>)..sort(_compareScheduleDate));
+      _catHealthLogs
+        ..clear()
+        ..addAll((results[2] as List<JsonMap>)..sort(_compareByEventDateDesc));
+      _catExpenses
+        ..clear()
+        ..addAll((results[3] as List<JsonMap>)..sort(_compareByEventDateDesc));
+      _catMedicalVisits
+        ..clear()
+        ..addAll((results[4] as List<JsonMap>)..sort(_compareByEventDateDesc));
+      _catConditions
+        ..clear()
+        ..addAll((results[5] as List<JsonMap>)..sort(_compareByUpdatedAtDesc));
+      _catMedications
+        ..clear()
+        ..addAll((results[6] as List<JsonMap>)..sort(_compareByUpdatedAtDesc));
+      _catForecast = results[7] as JsonMap?;
+      _catLatestReport = results[8] as JsonMap?;
+      _catVisitReports
+        ..clear()
+        ..addAll((results[9] as List<JsonMap>)..sort(_compareByUpdatedAtDesc));
+      final collaboration = _catDashboard?['collaboration'] as JsonMap?;
+      _catMembers
+        ..clear()
+        ..addAll(
+          ((collaboration?['members'] as List<dynamic>?) ?? const [])
+              .cast<JsonMap>(),
+        );
+      _catActivity
+        ..clear()
+        ..addAll(
+          ((collaboration?['recentActivity'] as List<dynamic>?) ?? const [])
+              .cast<JsonMap>(),
+        );
+    });
+  }
+
   Future<void> _refreshShell() async {
-    await _runBusy(_loadDashboard);
+    if (_activePetType == 'cat') {
+      await _runBusy(_loadCatDashboard);
+    } else {
+      await _runBusy(_loadDashboard);
+    }
+  }
+
+  Future<void> _logout() async {
+    widget.apiClient.clearSession();
+    await widget.sessionStore.clear();
+    if (!mounted) return;
+    setState(() {
+      _phase = _RootPhase.auth;
+      _dogs.clear();
+      _cats.clear();
+      _selectedDogId = null;
+      _selectedCatId = null;
+      _activePetType = 'dog';
+      _clearDashboardData();
+      _clearCatDashboardData();
+    });
   }
 
   Future<void> _login(String email, String password) async {
@@ -365,7 +517,7 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
       if (token != null) {
         await widget.sessionStore.saveToken(token);
       }
-      await _loadDogs(refreshDashboard: true);
+      await _loadAllPets(refreshDashboard: true);
     });
   }
 
@@ -381,21 +533,33 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
       if (token != null) {
         await widget.sessionStore.saveToken(token);
       }
-      await _loadDogs(refreshDashboard: true);
+      await _loadAllPets(refreshDashboard: true);
     });
   }
 
   Future<void> _submitOnboarding({
-    required JsonMap dog,
+    required String petType,
+    required JsonMap petData,
     required List<JsonMap> conditions,
   }) async {
     await _runBusy(() async {
-      await widget.apiClient.onboardDog({
-        'dog': dog,
-        'conditions': conditions,
-        'baseDate': DateFormat('yyyy-MM-dd').format(DateTime.now()),
-      });
-      await _loadDogs(refreshDashboard: true);
+      final baseDate = DateFormat('yyyy-MM-dd').format(DateTime.now());
+      if (petType == 'cat') {
+        await widget.apiClient.onboardCat({
+          'cat': petData,
+          'conditions': conditions,
+          'baseDate': baseDate,
+        });
+        setState(() => _activePetType = 'cat');
+      } else {
+        await widget.apiClient.onboardDog({
+          'dog': petData,
+          'conditions': conditions,
+          'baseDate': baseDate,
+        });
+        setState(() => _activePetType = 'dog');
+      }
+      await _loadAllPets(refreshDashboard: true);
     });
   }
 
@@ -405,6 +569,22 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
     await _runBusy(() async {
       await widget.apiClient.updateDog(dogId: dogId, payload: payload);
       await _loadDogs(refreshDashboard: true);
+    });
+  }
+
+  Future<void> _updateCat(JsonMap payload, {Uint8List? avatarBytes}) async {
+    final catId = _selectedCatId;
+    if (catId == null) return;
+    await _runBusy(() async {
+      await widget.apiClient.updateCat(catId: catId, payload: payload);
+      final cats = await widget.apiClient.cats();
+      final nextCatId = cats.any((c) => _asInt(c['id']) == catId) ? catId : null;
+      if (!mounted) return;
+      setState(() {
+        _cats..clear()..addAll(cats);
+        _selectedCatId = nextCatId;
+      });
+      await _loadCatDashboard();
     });
   }
 
@@ -789,87 +969,496 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
     });
   }
 
-  Future<void> _openDogEditor() async {
-    final dog = _selectedDog;
-    if (dog == null) return;
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => _DogEditorScreen(dog: dog, onSave: _updateDog),
-      ),
-    );
+  // ── Cat action methods ───────────────────────────────────────────────────
+
+  Future<void> _createCatSchedule({
+    required String scheduleType,
+    required String title,
+    required String dueDate,
+    required String description,
+    required String priority,
+    int? repeatCycleDays,
+    int? assignedToUserId,
+  }) async {
+    final catId = _selectedCatId;
+    if (catId == null) return;
+    await _runBusy(() async {
+      await widget.apiClient.createCatCareSchedule(
+        catId: catId,
+        scheduleType: scheduleType,
+        title: title,
+        dueDate: dueDate,
+        description: description,
+        priority: priority,
+        repeatCycleDays: repeatCycleDays,
+        assignedToUserId: assignedToUserId,
+      );
+      await _loadCatDashboard();
+    });
   }
 
-  Future<void> _openScheduleEditor({JsonMap? existing}) async {
+  Future<void> _updateCatSchedule({
+    required int scheduleId,
+    required String scheduleType,
+    required String title,
+    required String dueDate,
+    required String description,
+    required String priority,
+    required bool reminderEnabled,
+    int? repeatCycleDays,
+    int? assignedToUserId,
+  }) async {
+    await _runBusy(() async {
+      await widget.apiClient.updateCatCareSchedule(
+        scheduleId: scheduleId,
+        scheduleType: scheduleType,
+        title: title,
+        dueDate: dueDate,
+        description: description,
+        priority: priority,
+        reminderEnabled: reminderEnabled,
+        repeatCycleDays: repeatCycleDays,
+        assignedToUserId: assignedToUserId,
+      );
+      await _loadCatDashboard();
+    });
+  }
+
+  Future<void> _skipCatSchedule(int scheduleId) async {
+    await _runBusy(() async {
+      await widget.apiClient.skipCatSchedule(scheduleId);
+      await _loadCatDashboard();
+    });
+  }
+
+  Future<void> _completeCatSchedule(int scheduleId) async {
+    await _runBusy(() async {
+      await widget.apiClient.completeCatSchedule(scheduleId);
+      await _loadCatDashboard();
+    });
+  }
+
+  Future<void> _createCatHealthLog({
+    required String logType,
+    required String title,
+    required String memo,
+    num? valueNumeric,
+    String? valueUnit,
+    bool isSensitive = false,
+  }) async {
+    final catId = _selectedCatId;
+    if (catId == null) return;
+    await _runBusy(() async {
+      await widget.apiClient.createCatHealthLog(
+        catId: catId,
+        logType: logType,
+        title: title,
+        memo: memo,
+        recordedAt: DateTime.now().toIso8601String(),
+        valueNumeric: valueNumeric,
+        valueUnit: valueUnit,
+        isSensitive: isSensitive,
+      );
+      await _loadCatDashboard();
+    });
+  }
+
+  Future<void> _updateCatHealthLog({
+    required int logId,
+    required String logType,
+    required String title,
+    required String memo,
+    num? valueNumeric,
+    String? valueUnit,
+    bool isSensitive = false,
+  }) async {
+    await _runBusy(() async {
+      await widget.apiClient.updateCatHealthLog(
+        logId: logId,
+        logType: logType,
+        title: title,
+        memo: memo,
+        recordedAt: DateTime.now().toIso8601String(),
+        valueNumeric: valueNumeric,
+        valueUnit: valueUnit,
+        isSensitive: isSensitive,
+      );
+      await _loadCatDashboard();
+    });
+  }
+
+  Future<void> _deleteCatHealthLog(int logId) async {
+    await _runBusy(() async {
+      await widget.apiClient.deleteCatHealthLog(logId);
+      await _loadCatDashboard();
+    });
+  }
+
+  Future<void> _createCatExpense({
+    required String category,
+    required num amount,
+    required String expenseDate,
+    required String vendorName,
+    required String memo,
+    bool isSensitive = false,
+  }) async {
+    final catId = _selectedCatId;
+    if (catId == null) return;
+    await _runBusy(() async {
+      await widget.apiClient.createCatExpense(
+        catId: catId,
+        category: category,
+        amount: amount,
+        expenseDate: expenseDate,
+        vendorName: vendorName,
+        memo: memo,
+        isSensitive: isSensitive,
+      );
+      await _loadCatDashboard();
+    });
+  }
+
+  Future<void> _updateCatExpense({
+    required int expenseId,
+    required String category,
+    required num amount,
+    required String expenseDate,
+    required String vendorName,
+    required String memo,
+    bool isSensitive = false,
+  }) async {
+    await _runBusy(() async {
+      await widget.apiClient.updateCatExpense(
+        expenseId: expenseId,
+        category: category,
+        amount: amount,
+        expenseDate: expenseDate,
+        vendorName: vendorName,
+        memo: memo,
+        isSensitive: isSensitive,
+      );
+      await _loadCatDashboard();
+    });
+  }
+
+  Future<void> _deleteCatExpense(int expenseId) async {
+    await _runBusy(() async {
+      await widget.apiClient.deleteCatExpense(expenseId);
+      await _loadCatDashboard();
+    });
+  }
+
+  Future<void> _createCatMedicalVisit({
+    required String hospitalName,
+    required String symptoms,
+    required String diagnosis,
+    required String treatment,
+    required num? expenseAmount,
+    bool isSensitive = false,
+  }) async {
+    final catId = _selectedCatId;
+    if (catId == null) return;
+    final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
+    await _runBusy(() async {
+      await widget.apiClient.createCatMedicalVisit(
+        catId: catId,
+        hospitalName: hospitalName,
+        visitDate: today,
+        visitReason: symptoms.trim().isEmpty ? diagnosis : symptoms,
+        symptoms: symptoms,
+        diagnosis: diagnosis,
+        treatment: treatment,
+        prescribedItems: '',
+        followUpDate: '',
+        notes: '',
+        expenseAmount: expenseAmount,
+        expenseDate: today,
+        expenseMemo: '병원 방문 지출',
+        isSensitive: isSensitive,
+      );
+      await _loadCatDashboard();
+    });
+  }
+
+  Future<void> _updateCatMedicalVisit({
+    required int visitId,
+    required String hospitalName,
+    required String visitReason,
+    required String symptoms,
+    required String diagnosis,
+    required String treatment,
+    required String prescribedItems,
+    required String followUpDate,
+    required String notes,
+    bool isSensitive = false,
+  }) async {
+    await _runBusy(() async {
+      await widget.apiClient.updateCatMedicalVisit(
+        visitId: visitId,
+        hospitalName: hospitalName,
+        visitReason: visitReason,
+        symptoms: symptoms,
+        diagnosis: diagnosis,
+        treatment: treatment,
+        prescribedItems: prescribedItems,
+        followUpDate: followUpDate,
+        notes: notes,
+        isSensitive: isSensitive,
+      );
+      await _loadCatDashboard();
+    });
+  }
+
+  Future<void> _deleteCatMedicalVisit(int visitId) async {
+    await _runBusy(() async {
+      await widget.apiClient.deleteCatMedicalVisit(visitId);
+      await _loadCatDashboard();
+    });
+  }
+
+  Future<void> _createCatCondition({
+    required String conditionType,
+    required String conditionName,
+    required String severity,
+    required String diagnosedOn,
+    required String status,
+    required String notes,
+  }) async {
+    final catId = _selectedCatId;
+    if (catId == null) return;
+    await _runBusy(() async {
+      await widget.apiClient.createCatCondition(
+        catId: catId,
+        conditionType: conditionType,
+        conditionName: conditionName,
+        severity: severity,
+        diagnosedOn: diagnosedOn,
+        status: status,
+        notes: notes,
+      );
+      await _loadCatDashboard();
+    });
+  }
+
+  Future<void> _updateCatCondition({
+    required int conditionId,
+    required String conditionType,
+    required String conditionName,
+    required String severity,
+    required String diagnosedOn,
+    required String status,
+    required String notes,
+  }) async {
+    await _runBusy(() async {
+      await widget.apiClient.updateCatCondition(
+        conditionId: conditionId,
+        conditionType: conditionType,
+        conditionName: conditionName,
+        severity: severity,
+        diagnosedOn: diagnosedOn,
+        status: status,
+        notes: notes,
+      );
+      await _loadCatDashboard();
+    });
+  }
+
+  Future<void> _deleteCatCondition(int conditionId) async {
+    await _runBusy(() async {
+      await widget.apiClient.deleteCatCondition(conditionId);
+      await _loadCatDashboard();
+    });
+  }
+
+  Future<void> _createCatMedication({
+    required String medicationName,
+    required String dosage,
+    required String frequencyText,
+    required String startedOn,
+    required String endedOn,
+    required String prescribedBy,
+    required bool isActive,
+    required String notes,
+  }) async {
+    final catId = _selectedCatId;
+    if (catId == null) return;
+    await _runBusy(() async {
+      await widget.apiClient.createCatMedication(
+        catId: catId,
+        medicationName: medicationName,
+        dosage: dosage,
+        frequencyText: frequencyText,
+        startedOn: startedOn,
+        endedOn: endedOn,
+        prescribedBy: prescribedBy,
+        isActive: isActive,
+        notes: notes,
+      );
+      await _loadCatDashboard();
+    });
+  }
+
+  Future<void> _updateCatMedication({
+    required int medicationId,
+    required String medicationName,
+    required String dosage,
+    required String frequencyText,
+    required String startedOn,
+    required String endedOn,
+    required String prescribedBy,
+    required bool isActive,
+    required String notes,
+  }) async {
+    await _runBusy(() async {
+      await widget.apiClient.updateCatMedication(
+        medicationId: medicationId,
+        medicationName: medicationName,
+        dosage: dosage,
+        frequencyText: frequencyText,
+        startedOn: startedOn,
+        endedOn: endedOn,
+        prescribedBy: prescribedBy,
+        isActive: isActive,
+        notes: notes,
+      );
+      await _loadCatDashboard();
+    });
+  }
+
+  Future<void> _deleteCatMedication(int medicationId) async {
+    await _runBusy(() async {
+      await widget.apiClient.deleteCatMedication(medicationId);
+      await _loadCatDashboard();
+    });
+  }
+
+  Future<void> _recalculateCatForecast() async {
+    final catId = _selectedCatId;
+    if (catId == null) return;
+    await _runBusy(() async {
+      await widget.apiClient.recalculateCatForecast(catId);
+      await _loadCatDashboard();
+    });
+  }
+
+  Future<void> _generateCatReport() async {
+    final catId = _selectedCatId;
+    if (catId == null) return;
+    await _runBusy(() async {
+      await widget.apiClient.generateCatVisitReport(catId);
+      await _loadCatDashboard();
+      final catName = _selectedCat?['name'] as String? ?? '반려묘';
+      await widget.notifications.showReportReady(catName);
+    });
+  }
+
+  // ── Per-pet-type editor openers ──────────────────────────────────────────
+
+  Future<void> _openCurrentPetEditor() async {
+    if (_activePetType == 'cat') {
+      final cat = _selectedCat;
+      if (cat == null) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => _DogEditorScreen(dog: cat, onSave: _updateCat),
+        ),
+      );
+    } else {
+      await _openDogEditor();
+    }
+  }
+
+  Future<void> _openCurrentPetScheduleEditor({JsonMap? existing}) async {
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => _ScheduleEditorScreen(
           existing: existing,
-          members: _members,
-          onCreate: _createSchedule,
-          onUpdate: _updateSchedule,
+          members: _activePetType == 'cat' ? _catMembers : _members,
+          onCreate: _activePetType == 'cat' ? _createCatSchedule : _createSchedule,
+          onUpdate: _activePetType == 'cat' ? _updateCatSchedule : _updateSchedule,
         ),
       ),
     );
   }
 
-  Future<void> _openHealthLogEditor({JsonMap? existing}) async {
+  Future<void> _openCurrentPetHealthLogEditor({JsonMap? existing}) async {
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => _HealthLogEditorScreen(
           existing: existing,
-          onCreate: _createHealthLog,
-          onUpdate: _updateHealthLog,
+          onCreate: _activePetType == 'cat' ? _createCatHealthLog : _createHealthLog,
+          onUpdate: _activePetType == 'cat' ? _updateCatHealthLog : _updateHealthLog,
         ),
       ),
     );
   }
 
-  Future<void> _openExpenseEditor({JsonMap? existing}) async {
+  Future<void> _openCurrentPetExpenseEditor({JsonMap? existing}) async {
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => _ExpenseEditorScreen(
           existing: existing,
-          onCreate: _createExpense,
-          onUpdate: _updateExpense,
+          onCreate: _activePetType == 'cat' ? _createCatExpense : _createExpense,
+          onUpdate: _activePetType == 'cat' ? _updateCatExpense : _updateExpense,
         ),
       ),
     );
   }
 
-  Future<void> _openMedicalVisitEditor({JsonMap? existing}) async {
+  Future<void> _openCurrentPetMedicalVisitEditor({JsonMap? existing}) async {
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => _MedicalVisitEditorScreen(
           existing: existing,
-          onCreate: _createMedicalVisit,
-          onUpdate: _updateMedicalVisit,
+          onCreate: _activePetType == 'cat'
+              ? _createCatMedicalVisit
+              : _createMedicalVisit,
+          onUpdate: _activePetType == 'cat'
+              ? _updateCatMedicalVisit
+              : _updateMedicalVisit,
         ),
       ),
     );
   }
 
-  Future<void> _openConditionEditor({JsonMap? existing}) async {
+  Future<void> _openCurrentPetConditionEditor({JsonMap? existing}) async {
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (_) => _ConditionEditorSheet(
         existing: existing,
-        onCreate: _createCondition,
-        onUpdate: _updateCondition,
+        onCreate: _activePetType == 'cat' ? _createCatCondition : _createCondition,
+        onUpdate: _activePetType == 'cat' ? _updateCatCondition : _updateCondition,
       ),
     );
   }
 
-  Future<void> _openMedicationEditor({JsonMap? existing}) async {
+  Future<void> _openCurrentPetMedicationEditor({JsonMap? existing}) async {
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (_) => _MedicationEditorSheet(
         existing: existing,
-        onCreate: _createMedication,
-        onUpdate: _updateMedication,
+        onCreate: _activePetType == 'cat'
+            ? _createCatMedication
+            : _createMedication,
+        onUpdate: _activePetType == 'cat'
+            ? _updateCatMedication
+            : _updateMedication,
+      ),
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+
+  Future<void> _openDogEditor() async {
+    final dog = _selectedDog;
+    if (dog == null) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => _DogEditorScreen(dog: dog, onSave: _updateDog),
       ),
     );
   }
@@ -890,18 +1479,37 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
         busy: _busy,
         error: _error,
         onSubmit: _submitOnboarding,
+        hasDogs: _dogs.isNotEmpty,
+        hasCats: _cats.isNotEmpty,
       ),
       _RootPhase.shell => _buildShell(),
     };
   }
 
   Widget _buildShell() {
-    final dog = _selectedDog;
-    final access = (_dashboard?['access'] as JsonMap?) ?? const {};
+    final isCat = _activePetType == 'cat';
+    final petProfile = isCat ? _selectedCat : _selectedDog;
+    final currentDashboard = isCat ? _catDashboard : _dashboard;
+    final currentSchedules = isCat ? _catSchedules : _schedules;
+    final currentHealthLogs = isCat ? _catHealthLogs : _healthLogs;
+    final currentExpenses = isCat ? _catExpenses : _expenses;
+    final currentVisits = isCat ? _catMedicalVisits : _medicalVisits;
+    final currentConditions = isCat ? _catConditions : _conditions;
+    final currentMedications = isCat ? _catMedications : _medications;
+    final currentReports = isCat ? _catVisitReports : _visitReports;
+    final currentForecast = isCat ? _catForecast : _forecast;
+    final currentLatestReport = isCat ? _catLatestReport : _latestReport;
+    final currentMembers = isCat ? _catMembers : _members;
+    final currentActivity = isCat ? _catActivity : _activity;
+
+    final access = (currentDashboard?['access'] as JsonMap?) ?? const {};
     final canEditRecords =
         access['canEditRecords'] == true ||
         access['role'] == 'owner' ||
         access['role'] == 'editor';
+
+    final hasBothTypes = _dogs.isNotEmpty && _cats.isNotEmpty;
+
     return Scaffold(
       appBar: AppBar(
         backgroundColor: _bg,
@@ -912,7 +1520,7 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              dog?['name'] as String? ?? 'PawPlan',
+              petProfile?['name'] as String? ?? 'PawPlan',
               style: const TextStyle(fontWeight: FontWeight.w800),
             ),
             Text(
@@ -922,12 +1530,36 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
           ],
         ),
         actions: [
+          if (hasBothTypes)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(value: 'dog', label: Text('🐕', style: TextStyle(fontSize: 16))),
+                  ButtonSegment(value: 'cat', label: Text('🐈', style: TextStyle(fontSize: 16))),
+                ],
+                selected: {_activePetType},
+                onSelectionChanged: (sel) => _runBusy(() async {
+                  setState(() => _activePetType = sel.first);
+                  if (sel.first == 'cat') {
+                    await _loadCatDashboard();
+                  } else {
+                    await _loadDashboard();
+                  }
+                }),
+                showSelectedIcon: false,
+                style: ButtonStyle(
+                  visualDensity: VisualDensity.compact,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
+            ),
           IconButton(
             key: const ValueKey('dashboard-refresh-button'),
             onPressed: _busy ? null : _refreshShell,
             icon: const Icon(Icons.refresh_rounded),
           ),
-          if (_dogs.length > 1)
+          if (!isCat && _dogs.length > 1)
             PopupMenuButton<int>(
               key: const ValueKey('page-header-dog-switcher'),
               onSelected: (dogId) => _runBusy(() async {
@@ -947,6 +1579,45 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
                 child: Icon(Icons.expand_more_rounded),
               ),
             ),
+          if (isCat && _cats.length > 1)
+            PopupMenuButton<int>(
+              key: const ValueKey('page-header-cat-switcher'),
+              onSelected: (catId) => _runBusy(() async {
+                setState(() => _selectedCatId = catId);
+                await _loadCatDashboard();
+              }),
+              itemBuilder: (context) => _cats
+                  .map(
+                    (item) => PopupMenuItem<int>(
+                      value: _asInt(item['id']),
+                      child: Text(item['name'] as String? ?? '반려묘'),
+                    ),
+                  )
+                  .toList(),
+              child: const Padding(
+                padding: EdgeInsets.only(right: 16),
+                child: Icon(Icons.expand_more_rounded),
+              ),
+            ),
+          PopupMenuButton<String>(
+            key: const ValueKey('app-settings-menu'),
+            onSelected: (value) {
+              if (value == 'logout') _logout();
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: 'logout',
+                child: Row(
+                  children: [
+                    Icon(Icons.logout_rounded, size: 20),
+                    SizedBox(width: 12),
+                    Text('로그아웃'),
+                  ],
+                ),
+              ),
+            ],
+            icon: const Icon(Icons.more_vert_rounded),
+          ),
         ],
       ),
       body: Column(
@@ -968,56 +1639,67 @@ class _PawPlanRootState extends State<_PawPlanRoot> {
           Expanded(
             child: switch (_tab) {
               _DashboardTab.today => _TodayTab(
-                dog: dog,
-                dashboard: _dashboard,
+                dog: petProfile,
+                dashboard: currentDashboard,
                 access: access,
-                members: _members,
-                activity: _activity,
-                schedules: _schedules,
+                members: currentMembers,
+                activity: currentActivity,
+                schedules: currentSchedules,
                 canEditRecords: canEditRecords,
                 onRefresh: _refreshShell,
-                onOpenProfile: _openDogEditor,
-                onCreateSchedule: () => _openScheduleEditor(),
-                onEditSchedule: (item) => _openScheduleEditor(existing: item),
-                onSkipSchedule: _skipSchedule,
-                onCompleteSchedule: _completeSchedule,
-                onCreateHealthLog: () => _openHealthLogEditor(),
-                onCreateExpense: () => _openExpenseEditor(),
-                onCreateMedicalVisit: () => _openMedicalVisitEditor(),
+                onOpenProfile: _openCurrentPetEditor,
+                onCreateSchedule: () => _openCurrentPetScheduleEditor(),
+                onEditSchedule: (item) =>
+                    _openCurrentPetScheduleEditor(existing: item),
+                onSkipSchedule: isCat ? _skipCatSchedule : _skipSchedule,
+                onCompleteSchedule:
+                    isCat ? _completeCatSchedule : _completeSchedule,
+                onCreateHealthLog: () => _openCurrentPetHealthLogEditor(),
+                onCreateExpense: () => _openCurrentPetExpenseEditor(),
+                onCreateMedicalVisit: () =>
+                    _openCurrentPetMedicalVisitEditor(),
               ),
               _DashboardTab.records => _RecordsTab(
-                healthLogs: _healthLogs,
-                expenses: _expenses,
-                visits: _medicalVisits,
+                healthLogs: currentHealthLogs,
+                expenses: currentExpenses,
+                visits: currentVisits,
                 canEditRecords: canEditRecords,
                 onRefresh: _refreshShell,
-                onEditHealth: (item) => _openHealthLogEditor(existing: item),
-                onDeleteHealth: _deleteHealthLog,
-                onEditExpense: (item) => _openExpenseEditor(existing: item),
-                onDeleteExpense: _deleteExpense,
-                onEditVisit: (item) => _openMedicalVisitEditor(existing: item),
-                onDeleteVisit: _deleteMedicalVisit,
+                onEditHealth: (item) =>
+                    _openCurrentPetHealthLogEditor(existing: item),
+                onDeleteHealth: isCat ? _deleteCatHealthLog : _deleteHealthLog,
+                onEditExpense: (item) =>
+                    _openCurrentPetExpenseEditor(existing: item),
+                onDeleteExpense: isCat ? _deleteCatExpense : _deleteExpense,
+                onEditVisit: (item) =>
+                    _openCurrentPetMedicalVisitEditor(existing: item),
+                onDeleteVisit:
+                    isCat ? _deleteCatMedicalVisit : _deleteMedicalVisit,
               ),
               _DashboardTab.health => _HealthTab(
-                conditions: _conditions,
-                medications: _medications,
+                conditions: currentConditions,
+                medications: currentMedications,
                 canEditRecords: canEditRecords,
                 onRefresh: _refreshShell,
-                onCreateCondition: () => _openConditionEditor(),
-                onEditCondition: (item) => _openConditionEditor(existing: item),
-                onDeleteCondition: _deleteCondition,
-                onCreateMedication: () => _openMedicationEditor(),
+                onCreateCondition: () => _openCurrentPetConditionEditor(),
+                onEditCondition: (item) =>
+                    _openCurrentPetConditionEditor(existing: item),
+                onDeleteCondition:
+                    isCat ? _deleteCatCondition : _deleteCondition,
+                onCreateMedication: () => _openCurrentPetMedicationEditor(),
                 onEditMedication: (item) =>
-                    _openMedicationEditor(existing: item),
-                onDeleteMedication: _deleteMedication,
+                    _openCurrentPetMedicationEditor(existing: item),
+                onDeleteMedication:
+                    isCat ? _deleteCatMedication : _deleteMedication,
               ),
               _DashboardTab.reports => _ReportsTab(
-                forecast: _forecast,
-                latestReport: _latestReport,
-                visitReports: _visitReports,
+                forecast: currentForecast,
+                latestReport: currentLatestReport,
+                visitReports: currentReports,
                 onRefresh: _refreshShell,
-                onRecalculate: _recalculateForecast,
-                onGenerate: _generateReport,
+                onRecalculate:
+                    isCat ? _recalculateCatForecast : _recalculateForecast,
+                onGenerate: isCat ? _generateCatReport : _generateReport,
               ),
             },
           ),
@@ -1259,12 +1941,17 @@ class _OnboardingScreen extends StatefulWidget {
     required this.busy,
     required this.error,
     required this.onSubmit,
+    this.hasDogs = false,
+    this.hasCats = false,
   });
 
   final bool busy;
   final String? error;
+  final bool hasDogs;
+  final bool hasCats;
   final Future<void> Function({
-    required JsonMap dog,
+    required String petType,
+    required JsonMap petData,
     required List<JsonMap> conditions,
   })
   onSubmit;
@@ -1274,6 +1961,7 @@ class _OnboardingScreen extends StatefulWidget {
 }
 
 class _OnboardingScreenState extends State<_OnboardingScreen> {
+  String _petType = 'dog';
   final _name = TextEditingController();
   final _breed = TextEditingController();
   final _birthDate = TextEditingController(
@@ -1306,7 +1994,8 @@ class _OnboardingScreenState extends State<_OnboardingScreen> {
   Future<void> _submit() async {
     try {
       await widget.onSubmit(
-        dog: {
+        petType: _petType,
+        petData: {
           'name': _name.text.trim(),
           'breed': _breed.text.trim(),
           'birthDate': _birthDate.text.trim(),
@@ -1330,6 +2019,7 @@ class _OnboardingScreenState extends State<_OnboardingScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isCat = _petType == 'cat';
     return Scaffold(
       body: SafeArea(
         child: Center(
@@ -1343,9 +2033,9 @@ class _OnboardingScreenState extends State<_OnboardingScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text(
-                          '첫 반려견을 등록해볼까요?',
-                          style: TextStyle(
+                        Text(
+                          isCat ? '반려묘를 등록해볼까요?' : '첫 반려견을 등록해볼까요?',
+                          style: const TextStyle(
                             fontSize: 32,
                             fontWeight: FontWeight.w800,
                           ),
@@ -1355,21 +2045,38 @@ class _OnboardingScreenState extends State<_OnboardingScreen> {
                           '기본 프로필만 입력하면 바로 대시보드로 이동합니다.',
                           style: TextStyle(fontSize: 15, color: _textMuted),
                         ),
-                        const SizedBox(height: 24),
+                        const SizedBox(height: 20),
+                        SegmentedButton<String>(
+                          segments: const [
+                            ButtonSegment(
+                              value: 'dog',
+                              label: Text('🐕 강아지'),
+                            ),
+                            ButtonSegment(
+                              value: 'cat',
+                              label: Text('🐈 고양이'),
+                            ),
+                          ],
+                          selected: {_petType},
+                          onSelectionChanged: (sel) =>
+                              setState(() => _petType = sel.first),
+                          showSelectedIcon: false,
+                        ),
+                        const SizedBox(height: 20),
                         _SectionCard(
                           child: Column(
                             children: [
                               TextField(
                                 controller: _name,
-                                decoration: const InputDecoration(
-                                  labelText: '이름',
+                                decoration: InputDecoration(
+                                  labelText: isCat ? '고양이 이름' : '이름',
                                 ),
                               ),
                               const SizedBox(height: 14),
                               TextField(
                                 controller: _breed,
-                                decoration: const InputDecoration(
-                                  labelText: '견종',
+                                decoration: InputDecoration(
+                                  labelText: isCat ? '품종' : '견종',
                                 ),
                               ),
                               const SizedBox(height: 14),

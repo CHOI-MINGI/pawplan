@@ -9,6 +9,7 @@ import { AuthedRequest, requireAuth } from "../auth.js";
 import {
   decorateCareSchedule,
   generateDefaultCareSchedules,
+  generateDefaultCatCareSchedules,
 } from "../domain/carePlan.js";
 import {
   assignmentMeta,
@@ -24,9 +25,11 @@ import {
 } from "../domain/collaboration.js";
 import {
   latestForecasts,
+  latestCatForecasts,
   recalculateCostForecasts,
+  recalculateCatCostForecasts,
 } from "../domain/costForecast.js";
-import { buildVisitReport, visitReportNotice } from "../domain/visitReport.js";
+import { buildVisitReport, buildCatVisitReport, visitReportNotice } from "../domain/visitReport.js";
 import {
   asyncHandler,
   HttpError,
@@ -46,6 +49,7 @@ const uploadRoot = path.resolve(
   process.env.UPLOAD_ROOT ?? path.join(process.cwd(), "uploads"),
 );
 const medicalVisitUploadDir = path.join(uploadRoot, "medical-visits");
+const catMedicalVisitUploadDir = path.join(uploadRoot, "cat-medical-visits");
 const attachmentFileTypes = new Set([
   "receipt",
   "prescription",
@@ -59,6 +63,20 @@ const attachmentUpload = multer({
     destination: (_req, _file, callback) => {
       fs.mkdirSync(medicalVisitUploadDir, { recursive: true });
       callback(null, medicalVisitUploadDir);
+    },
+    filename: (_req, file, callback) => {
+      const extension = path.extname(file.originalname).slice(0, 20);
+      callback(null, `${Date.now()}-${randomUUID()}${extension}`);
+    },
+  }),
+  limits: { fileSize: 8 * 1024 * 1024 },
+});
+
+const catAttachmentUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, callback) => {
+      fs.mkdirSync(catMedicalVisitUploadDir, { recursive: true });
+      callback(null, catMedicalVisitUploadDir);
     },
     filename: (_req, file, callback) => {
       const extension = path.extname(file.originalname).slice(0, 20);
@@ -2735,5 +2753,1424 @@ appRoutes.get(
       throw new HttpError(404, "NOT_FOUND", "visit report not found");
     await requireDogAccess(ownerId, report.dogId);
     ok(res, visitReportResponse(report));
+  }),
+);
+
+// ─── Cat helpers ────────────────────────────────────────────────────────────
+
+async function requireCatAccess(ownerId: bigint, catId: bigint) {
+  const cat = await prisma.cat.findFirst({
+    where: {
+      id: catId,
+      OR: [
+        { primaryOwnerId: ownerId },
+        { memberships: { some: { userId: ownerId, status: "active" } } },
+      ],
+    },
+  });
+  if (!cat) throw new HttpError(404, "NOT_FOUND", "cat not found");
+  return cat;
+}
+
+async function requireCatOwnerAccess(ownerId: bigint, catId: bigint) {
+  const cat = await prisma.cat.findFirst({
+    where: {
+      id: catId,
+      OR: [
+        { primaryOwnerId: ownerId },
+        { memberships: { some: { userId: ownerId, role: "owner", status: "active" } } },
+      ],
+    },
+  });
+  if (!cat) throw new HttpError(404, "NOT_FOUND", "cat not found");
+  return cat;
+}
+
+async function requireCatWriteAccess(uid: bigint, catId: bigint) {
+  const cat = await prisma.cat.findFirst({
+    where: {
+      id: catId,
+      OR: [
+        { primaryOwnerId: uid },
+        { memberships: { some: { userId: uid, status: "active", role: { in: ["owner", "editor"] } } } },
+      ],
+    },
+  });
+  if (!cat) throw new HttpError(404, "NOT_FOUND", "cat not found");
+  return cat;
+}
+
+async function catAccessRole(uid: bigint, cat: { id: bigint; primaryOwnerId: bigint }) {
+  if (cat.primaryOwnerId === uid) return "owner";
+  const membership = await prisma.catMembership.findFirst({
+    where: { catId: cat.id, userId: uid, status: "active" },
+    select: { role: true },
+  });
+  return (membership?.role as AccessRole | undefined) ?? null;
+}
+
+async function catAccessContext(viewerId: bigint, catId: bigint) {
+  const cat = await requireCatAccess(viewerId, catId);
+  const role = await catAccessRole(viewerId, cat);
+  return { cat, role };
+}
+
+async function loadCatUserDirectory(catId: bigint, extraUserIds: Array<bigint | null | undefined> = []) {
+  const memberships = await prisma.catMembership.findMany({
+    where: { catId, status: "active" },
+    include: { user: { select: userSummarySelect } },
+  });
+  const directory = buildUserDirectory(memberships.map((m) => m.user));
+  const missingUserIds = extraUserIds
+    .filter((id): id is bigint => id !== null && id !== undefined)
+    .filter((id) => !directory.has(id.toString()));
+  if (missingUserIds.length > 0) {
+    const users = await prisma.user.findMany({
+      where: { id: { in: missingUserIds } },
+      select: userSummarySelect,
+    });
+    for (const user of users) {
+      directory.set(user.id.toString(), user);
+    }
+  }
+  return directory;
+}
+
+async function parseAssignableUserIdForCat(value: unknown, catId: bigint, label = "assignedToUserId") {
+  if (value === undefined) return undefined;
+  if (value === null || value === "") return null;
+  const assignedTo = parseId(String(value), label);
+  const hasAccess = await prisma.cat.findFirst({
+    where: {
+      id: catId,
+      OR: [
+        { primaryOwnerId: assignedTo },
+        { memberships: { some: { userId: assignedTo, status: "active" } } },
+      ],
+    },
+    select: { id: true },
+  });
+  if (!hasAccess) {
+    throw new HttpError(400, "VALIDATION_ERROR", "assigned user must be an active family member");
+  }
+  return assignedTo;
+}
+
+async function requireCatMembershipOwnerAccess(ownerId: bigint, membershipId: bigint) {
+  const membership = await prisma.catMembership.findUnique({ where: { id: membershipId } });
+  if (!membership) throw new HttpError(404, "NOT_FOUND", "membership not found");
+  await requireCatOwnerAccess(ownerId, membership.catId);
+  return membership;
+}
+
+async function requireCatScheduleAccess(ownerId: bigint, scheduleId: bigint) {
+  const schedule = await prisma.catCareSchedule.findUnique({ where: { id: scheduleId } });
+  if (!schedule) throw new HttpError(404, "NOT_FOUND", "schedule not found");
+  await requireCatAccess(ownerId, schedule.catId);
+  return schedule;
+}
+
+async function requireCatScheduleWriteAccess(ownerId: bigint, scheduleId: bigint) {
+  const schedule = await prisma.catCareSchedule.findUnique({ where: { id: scheduleId } });
+  if (!schedule) throw new HttpError(404, "NOT_FOUND", "schedule not found");
+  await requireCatWriteAccess(ownerId, schedule.catId);
+  return schedule;
+}
+
+async function requireCatConditionWriteAccess(ownerId: bigint, conditionId: bigint) {
+  const condition = await prisma.catCondition.findUnique({ where: { id: conditionId } });
+  if (!condition) throw new HttpError(404, "NOT_FOUND", "condition not found");
+  await requireCatWriteAccess(ownerId, condition.catId);
+  return condition;
+}
+
+async function requireCatMedicationWriteAccess(ownerId: bigint, medicationId: bigint) {
+  const medication = await prisma.catMedication.findUnique({ where: { id: medicationId } });
+  if (!medication) throw new HttpError(404, "NOT_FOUND", "medication not found");
+  await requireCatWriteAccess(ownerId, medication.catId);
+  return medication;
+}
+
+async function requireCatHealthLogAccess(ownerId: bigint, logId: bigint) {
+  const log = await prisma.catHealthLog.findUnique({ where: { id: logId } });
+  if (!log) throw new HttpError(404, "NOT_FOUND", "health log not found");
+  const { role } = await catAccessContext(ownerId, log.catId);
+  if (!canViewSensitiveRecord({ accessRole: role, viewerId: ownerId, createdBy: log.createdBy, isSensitive: log.isSensitive })) {
+    throw new HttpError(404, "NOT_FOUND", "health log not found");
+  }
+  return log;
+}
+
+async function requireCatHealthLogWriteAccess(ownerId: bigint, logId: bigint) {
+  const log = await prisma.catHealthLog.findUnique({ where: { id: logId } });
+  if (!log) throw new HttpError(404, "NOT_FOUND", "health log not found");
+  await requireCatWriteAccess(ownerId, log.catId);
+  return log;
+}
+
+async function requireCatMedicalVisitAccess(ownerId: bigint, visitId: bigint) {
+  const visit = await prisma.catMedicalVisit.findUnique({ where: { id: visitId } });
+  if (!visit) throw new HttpError(404, "NOT_FOUND", "medical visit not found");
+  const { role } = await catAccessContext(ownerId, visit.catId);
+  if (!canViewSensitiveRecord({ accessRole: role, viewerId: ownerId, createdBy: visit.createdBy, isSensitive: visit.isSensitive })) {
+    throw new HttpError(404, "NOT_FOUND", "medical visit not found");
+  }
+  return visit;
+}
+
+async function requireCatMedicalVisitWriteAccess(ownerId: bigint, visitId: bigint) {
+  const visit = await prisma.catMedicalVisit.findUnique({ where: { id: visitId } });
+  if (!visit) throw new HttpError(404, "NOT_FOUND", "medical visit not found");
+  await requireCatWriteAccess(ownerId, visit.catId);
+  return visit;
+}
+
+async function requireCatAttachmentAccess(ownerId: bigint, attachmentId: bigint) {
+  const attachment = await prisma.catMedicalVisitAttachment.findUnique({
+    where: { id: attachmentId },
+    include: { medicalVisit: { select: { catId: true } } },
+  });
+  if (!attachment) throw new HttpError(404, "NOT_FOUND", "attachment not found");
+  await requireCatAccess(ownerId, attachment.medicalVisit.catId);
+  return attachment;
+}
+
+async function requireCatAttachmentWriteAccess(ownerId: bigint, attachmentId: bigint) {
+  const attachment = await prisma.catMedicalVisitAttachment.findUnique({
+    where: { id: attachmentId },
+    include: { medicalVisit: { select: { catId: true } } },
+  });
+  if (!attachment) throw new HttpError(404, "NOT_FOUND", "attachment not found");
+  await requireCatWriteAccess(ownerId, attachment.medicalVisit.catId);
+  return attachment;
+}
+
+async function requireCatExpenseAccess(ownerId: bigint, expenseId: bigint) {
+  const expense = await prisma.catExpense.findUnique({ where: { id: expenseId } });
+  if (!expense) throw new HttpError(404, "NOT_FOUND", "expense not found");
+  const { role } = await catAccessContext(ownerId, expense.catId);
+  if (!canViewSensitiveRecord({ accessRole: role, viewerId: ownerId, createdBy: expense.createdBy, isSensitive: expense.isSensitive })) {
+    throw new HttpError(404, "NOT_FOUND", "expense not found");
+  }
+  return expense;
+}
+
+async function requireCatExpenseWriteAccess(ownerId: bigint, expenseId: bigint) {
+  const expense = await prisma.catExpense.findUnique({ where: { id: expenseId } });
+  if (!expense) throw new HttpError(404, "NOT_FOUND", "expense not found");
+  await requireCatWriteAccess(ownerId, expense.catId);
+  return expense;
+}
+
+async function createNextRecurringCatSchedule(
+  schedule: Awaited<ReturnType<typeof requireCatScheduleAccess>>,
+  createdBy: bigint,
+) {
+  if (!schedule.repeatCycleDays) return null;
+  return prisma.catCareSchedule.create({
+    data: {
+      catId: schedule.catId,
+      scheduleType: schedule.scheduleType,
+      title: schedule.title,
+      description: schedule.description,
+      dueDate: addDays(schedule.dueDate, schedule.repeatCycleDays),
+      repeatCycleDays: schedule.repeatCycleDays,
+      priority: schedule.priority,
+      sourceType: schedule.sourceType,
+      reminderEnabled: schedule.reminderEnabled,
+      createdBy,
+      assignedTo: schedule.assignedTo,
+    },
+  });
+}
+
+function catVisitReportResponse(
+  report: Awaited<ReturnType<typeof prisma.catVisitReport.findFirst>>,
+) {
+  if (!report) return null;
+  const summary = jsonRecord(report.summaryJson);
+  const sharePath = `/cat-visit-reports/${report.id}`;
+  const summaryShare = jsonRecord(summary?.share);
+  return {
+    ...report,
+    summary,
+    notice: visitReportNotice,
+    share: {
+      ...(summaryShare ?? {}),
+      sharePath,
+      pdfUrl: report.pdfUrl ?? summaryShare?.pdfUrl ?? null,
+      pdfStatus: report.pdfUrl ? "ready" : (summaryShare?.pdfStatus ?? "not_generated"),
+    },
+  };
+}
+
+// ─── Cat endpoints ───────────────────────────────────────────────────────────
+
+appRoutes.post(
+  "/onboarding/cats",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catInput = req.body.cat ?? {};
+    const baseDate = optionalDate(req.body.baseDate) ?? new Date();
+
+    const result = await prisma.$transaction(async (tx) => {
+      const cat = await tx.cat.create({
+        data: {
+          primaryOwnerId: ownerId,
+          name: requireString(catInput.name, "name"),
+          breed: requireString(catInput.breed, "breed"),
+          birthDate: optionalDate(catInput.birthDate),
+          sex: requireString(catInput.sex, "sex"),
+          neutered: Boolean(catInput.neutered),
+          currentWeightKg: optionalNumber(catInput.currentWeightKg),
+          targetWeightKg: optionalNumber(catInput.targetWeightKg),
+          activityLevel: typeof catInput.activityLevel === "string" ? catInput.activityLevel : "medium",
+          insuranceStatus: typeof catInput.insuranceStatus === "string" ? catInput.insuranceStatus : "none",
+          notes: typeof catInput.notes === "string" ? catInput.notes : undefined,
+        },
+      });
+      await tx.catMembership.create({
+        data: {
+          catId: cat.id,
+          userId: ownerId,
+          role: "owner",
+          status: "active",
+          invitedBy: ownerId,
+          joinedAt: new Date(),
+        },
+      });
+
+      for (const condition of Array.isArray(req.body.conditions) ? req.body.conditions : []) {
+        await tx.catCondition.create({
+          data: {
+            catId: cat.id,
+            conditionType: requireString(condition.conditionType, "conditionType"),
+            conditionName: requireString(condition.conditionName, "conditionName"),
+            severity: typeof condition.severity === "string" ? condition.severity : undefined,
+            diagnosedOn: optionalDate(condition.diagnosedOn),
+            status: typeof condition.status === "string" ? condition.status : "active",
+            notes: typeof condition.notes === "string" ? condition.notes : undefined,
+          },
+        });
+      }
+
+      for (const medication of Array.isArray(req.body.medications) ? req.body.medications : []) {
+        await tx.catMedication.create({
+          data: {
+            catId: cat.id,
+            medicationName: requireString(medication.medicationName, "medicationName"),
+            dosage: typeof medication.dosage === "string" ? medication.dosage : undefined,
+            frequencyText: typeof medication.frequencyText === "string" ? medication.frequencyText : undefined,
+            startedOn: optionalDate(medication.startedOn),
+            endedOn: optionalDate(medication.endedOn),
+            prescribedBy: typeof medication.prescribedBy === "string" ? medication.prescribedBy : undefined,
+            isActive: medication.isActive !== false,
+            notes: typeof medication.notes === "string" ? medication.notes : undefined,
+          },
+        });
+      }
+
+      const generatedScheduleCount = await generateDefaultCatCareSchedules(tx, cat.id, baseDate, ownerId);
+      await recalculateCatCostForecasts(tx, cat.id);
+      const forecasts = await latestCatForecasts(tx, cat.id);
+      return { cat, generatedScheduleCount, forecasts };
+    });
+
+    ok(res, {
+      catId: result.cat.id,
+      generatedScheduleCount: result.generatedScheduleCount,
+      forecastSummary: {
+        monthlyEstimate: result.forecasts.basic?.monthlyEstimate ?? null,
+        yearlyEstimate: result.forecasts.basic?.yearlyEstimate ?? null,
+      },
+    }, 201);
+  }),
+);
+
+appRoutes.post(
+  "/cats",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const cat = await prisma.$transaction(async (tx) => {
+      const created = await tx.cat.create({
+        data: {
+          primaryOwnerId: ownerId,
+          name: requireString(req.body.name, "name"),
+          breed: requireString(req.body.breed, "breed"),
+          birthDate: optionalDate(req.body.birthDate),
+          sex: requireString(req.body.sex, "sex"),
+          neutered: Boolean(req.body.neutered),
+          currentWeightKg: optionalNumber(req.body.currentWeightKg),
+          targetWeightKg: optionalNumber(req.body.targetWeightKg),
+          activityLevel: typeof req.body.activityLevel === "string" ? req.body.activityLevel : "medium",
+          insuranceStatus: typeof req.body.insuranceStatus === "string" ? req.body.insuranceStatus : "none",
+          notes: typeof req.body.notes === "string" ? req.body.notes : undefined,
+        },
+        select: { id: true, name: true },
+      });
+      await tx.catMembership.create({
+        data: {
+          catId: created.id,
+          userId: ownerId,
+          role: "owner",
+          status: "active",
+          invitedBy: ownerId,
+          joinedAt: new Date(),
+        },
+      });
+      return created;
+    });
+    ok(res, cat, 201);
+  }),
+);
+
+appRoutes.get(
+  "/cats",
+  asyncHandler(async (req, res) => {
+    const requesterId = userId(req as AuthedRequest);
+    const cats = await prisma.cat.findMany({
+      where: {
+        OR: [
+          { primaryOwnerId: requesterId },
+          { memberships: { some: { userId: requesterId, status: "active" } } },
+        ],
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    ok(res, cats);
+  }),
+);
+
+appRoutes.get(
+  "/cats/:catId",
+  asyncHandler(async (req, res) => {
+    ok(res, await requireCatAccess(userId(req as AuthedRequest), parseId(req.params.catId, "catId")));
+  }),
+);
+
+appRoutes.patch(
+  "/cats/:catId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    await requireCatOwnerAccess(ownerId, catId);
+    const cat = await prisma.cat.update({
+      where: { id: catId },
+      data: {
+        name: typeof req.body.name === "string" ? req.body.name : undefined,
+        breed: typeof req.body.breed === "string" ? req.body.breed : undefined,
+        birthDate: optionalDate(req.body.birthDate),
+        sex: typeof req.body.sex === "string" ? req.body.sex : undefined,
+        neutered: typeof req.body.neutered === "boolean" ? req.body.neutered : undefined,
+        currentWeightKg: optionalNumber(req.body.currentWeightKg),
+        targetWeightKg: optionalNumber(req.body.targetWeightKg),
+        activityLevel: typeof req.body.activityLevel === "string" ? req.body.activityLevel : undefined,
+        insuranceStatus: typeof req.body.insuranceStatus === "string" ? req.body.insuranceStatus : undefined,
+        notes: typeof req.body.notes === "string" ? req.body.notes : undefined,
+      },
+    });
+    await recalculateCatCostForecasts(prisma, catId);
+    ok(res, cat);
+  }),
+);
+
+appRoutes.get(
+  "/cats/:catId/delete-preview",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    const cat = await requireCatOwnerAccess(ownerId, catId);
+
+    const [schedules, conditions, medications, healthLogs, medicalVisits, expenses, forecasts, visitReports, attachments] =
+      await Promise.all([
+        prisma.catCareSchedule.count({ where: { catId } }),
+        prisma.catCondition.count({ where: { catId } }),
+        prisma.catMedication.count({ where: { catId } }),
+        prisma.catHealthLog.count({ where: { catId } }),
+        prisma.catMedicalVisit.count({ where: { catId } }),
+        prisma.catExpense.count({ where: { catId } }),
+        prisma.catCostForecast.count({ where: { catId } }),
+        prisma.catVisitReport.count({ where: { catId } }),
+        prisma.catMedicalVisitAttachment.aggregate({
+          where: { medicalVisit: { catId } },
+          _count: { _all: true },
+          _sum: { fileSizeBytes: true },
+        }),
+      ]);
+
+    ok(res, {
+      cat: { id: cat.id, name: cat.name },
+      scope: "pet",
+      accessPolicy: "primary_owner_only",
+      counts: { schedules, conditions, medications, healthLogs, medicalVisits, expenses, forecasts, visitReports, attachments: attachments._count._all },
+      attachmentBytes: attachments._sum.fileSizeBytes ?? 0,
+    });
+  }),
+);
+
+appRoutes.delete(
+  "/cats/:catId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    await requireCatOwnerAccess(ownerId, catId);
+
+    const attachments = await prisma.catMedicalVisitAttachment.findMany({
+      where: { medicalVisit: { catId } },
+      select: { fileUrl: true },
+    });
+
+    await prisma.cat.delete({ where: { id: catId } });
+    await Promise.all(attachments.map((a) => deleteAttachmentFile(a.fileUrl)));
+
+    ok(res, { deleted: true, scope: "pet", accessPolicy: "primary_owner_only" });
+  }),
+);
+
+appRoutes.get(
+  "/cats/:catId/members",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    await requireCatAccess(ownerId, catId);
+
+    const memberships = await prisma.catMembership.findMany({
+      where: { catId, status: "active" },
+      orderBy: [{ role: "asc" }, { createdAt: "asc" }],
+      include: { user: { select: { id: true, email: true, name: true } } },
+    });
+
+    ok(res, memberships.map((m) => ({ id: m.id, catId: m.catId, userId: m.userId, role: m.role, status: m.status, joinedAt: m.joinedAt, createdAt: m.createdAt, user: m.user })));
+  }),
+);
+
+appRoutes.post(
+  "/cats/:catId/members",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    await requireCatOwnerAccess(ownerId, catId);
+
+    const email = requireString(req.body.email, "email").toLowerCase();
+    const role = normalizeMembershipRole(req.body.role ?? "viewer");
+    const member = await prisma.user.findUnique({ where: { email }, select: { id: true, email: true, name: true } });
+    if (!member) throw new HttpError(404, "NOT_FOUND", "user not found");
+
+    const membership = await prisma.catMembership.upsert({
+      where: { catId_userId: { catId, userId: member.id } },
+      create: { catId, userId: member.id, role, status: "active", invitedBy: ownerId, joinedAt: new Date() },
+      update: { role, status: "active", invitedBy: ownerId, joinedAt: new Date() },
+      include: { user: { select: { id: true, email: true, name: true } } },
+    });
+
+    ok(res, { id: membership.id, catId: membership.catId, userId: membership.userId, role: membership.role, status: membership.status, joinedAt: membership.joinedAt, user: membership.user }, 201);
+  }),
+);
+
+appRoutes.patch(
+  "/cat-memberships/:membershipId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const membershipId = parseId(req.params.membershipId, "membershipId");
+    const existing = await requireCatMembershipOwnerAccess(ownerId, membershipId);
+    const role = req.body.role === undefined ? existing.role : normalizeMembershipRole(req.body.role);
+    const status = typeof req.body.status === "string" ? req.body.status : existing.status;
+
+    if (status !== "active" && status !== "removed") {
+      throw new HttpError(400, "VALIDATION_ERROR", "status must be active or removed");
+    }
+    if (existing.userId === ownerId && (role !== "owner" || status !== "active")) {
+      throw new HttpError(400, "VALIDATION_ERROR", "cannot demote or remove your own owner membership");
+    }
+
+    const membership = await prisma.catMembership.update({
+      where: { id: membershipId },
+      data: { role, status },
+      include: { user: { select: { id: true, email: true, name: true } } },
+    });
+
+    ok(res, { id: membership.id, catId: membership.catId, userId: membership.userId, role: membership.role, status: membership.status, joinedAt: membership.joinedAt, user: membership.user });
+  }),
+);
+
+appRoutes.delete(
+  "/cat-memberships/:membershipId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const membershipId = parseId(req.params.membershipId, "membershipId");
+    const existing = await requireCatMembershipOwnerAccess(ownerId, membershipId);
+
+    if (existing.userId === ownerId) {
+      throw new HttpError(400, "VALIDATION_ERROR", "cannot remove your own owner membership");
+    }
+
+    await prisma.catMembership.update({ where: { id: membershipId }, data: { status: "removed" } });
+    ok(res, { removed: true });
+  }),
+);
+
+appRoutes.get(
+  "/cats/:catId/dashboard",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    const { cat, role } = await catAccessContext(ownerId, catId);
+    const recordVisibility = sensitiveRecordWhere(role, ownerId);
+    const canEditRecords = role === "owner" || role === "editor";
+    const today = new Date();
+    const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+    const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+
+    const [todaySchedules, recentHealthLogs, expenses, forecasts, members, hiddenConditions, hiddenMedications, hiddenHealthLogs, hiddenMedicalVisits, hiddenExpenses] =
+      await Promise.all([
+        prisma.catCareSchedule.findMany({
+          where: { catId, status: "pending", dueDate: { gte: addDays(new Date(today.toISOString().slice(0, 10)), -30), lte: monthEnd } },
+          orderBy: { dueDate: "asc" },
+          take: 5,
+        }),
+        prisma.catHealthLog.findMany({ where: { catId, ...recordVisibility }, orderBy: { recordedAt: "desc" }, take: 5 }),
+        prisma.catExpense.findMany({ where: { catId, ...recordVisibility, expenseDate: { gte: monthStart, lte: monthEnd } } }),
+        latestCatForecasts(prisma, catId),
+        prisma.catMembership.findMany({ where: { catId, status: "active" }, orderBy: [{ role: "asc" }, { createdAt: "asc" }], include: { user: { select: userSummarySelect } } }),
+        canEditRecords ? Promise.resolve(0) : prisma.catCondition.count({ where: { catId, isSensitive: true, NOT: { createdBy: ownerId } } }),
+        canEditRecords ? Promise.resolve(0) : prisma.catMedication.count({ where: { catId, isSensitive: true, NOT: { createdBy: ownerId } } }),
+        canEditRecords ? Promise.resolve(0) : prisma.catHealthLog.count({ where: { catId, isSensitive: true, NOT: { createdBy: ownerId } } }),
+        canEditRecords ? Promise.resolve(0) : prisma.catMedicalVisit.count({ where: { catId, isSensitive: true, NOT: { createdBy: ownerId } } }),
+        canEditRecords ? Promise.resolve(0) : prisma.catExpense.count({ where: { catId, isSensitive: true, NOT: { createdBy: ownerId } } }),
+      ]);
+
+    const userDirectory = buildUserDirectory(members.map((m) => m.user));
+    const byCategory = Object.values(
+      expenses.reduce<Record<string, { category: string; amount: number }>>((acc, e) => {
+        acc[e.expenseCategory] ??= { category: e.expenseCategory, amount: 0 };
+        acc[e.expenseCategory].amount += Number(e.amount);
+        return acc;
+      }, {}),
+    );
+
+    ok(res, {
+      cat: { id: cat.id, name: cat.name, breed: cat.breed, birthDate: cat.birthDate, sex: cat.sex, neutered: cat.neutered, currentWeightKg: cat.currentWeightKg, targetWeightKg: cat.targetWeightKg, activityLevel: cat.activityLevel, insuranceStatus: cat.insuranceStatus, notes: cat.notes },
+      todaySchedules: todaySchedules.map((s) => careScheduleResponse(s as Parameters<typeof careScheduleResponse>[0], ownerId, role, userDirectory)),
+      recentHealthLogs: recentHealthLogs.map((log) => recordResponse(log, ownerId, role, userDirectory)),
+      monthlyExpenseSummary: { totalAmount: byCategory.reduce((sum, item) => sum + item.amount, 0), byCategory },
+      latestForecast: forecasts.basic ? { monthlyEstimate: forecasts.basic.monthlyEstimate, yearlyEstimate: forecasts.basic.yearlyEstimate } : null,
+      access: { userId: ownerId, role, canManage: role === "owner", canEditRecords, canViewSensitive: canEditRecords },
+      collaboration: {
+        members: members.map((m) => ({ id: m.id, catId: m.catId, userId: m.userId, role: m.role, status: m.status, joinedAt: m.joinedAt, user: m.user })),
+        hiddenSensitiveCounts: { conditions: hiddenConditions, medications: hiddenMedications, healthLogs: hiddenHealthLogs, medicalVisits: hiddenMedicalVisits, expenses: hiddenExpenses, total: hiddenConditions + hiddenMedications + hiddenHealthLogs + hiddenMedicalVisits + hiddenExpenses },
+      },
+    });
+  }),
+);
+
+appRoutes.get(
+  "/cats/:catId/conditions",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    const { role } = await catAccessContext(ownerId, catId);
+    const conditions = await prisma.catCondition.findMany({
+      where: { catId, ...sensitiveRecordWhere(role, ownerId), status: typeof req.query.status === "string" ? req.query.status : undefined },
+      orderBy: [{ status: "asc" }, { updatedAt: "desc" }],
+    });
+    const users = await loadCatUserDirectory(catId, conditions.map((c) => c.createdBy));
+    ok(res, conditions.map((c) => recordResponse(c, ownerId, role, users)));
+  }),
+);
+
+appRoutes.post(
+  "/cats/:catId/conditions",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    await requireCatWriteAccess(ownerId, catId);
+    const condition = await prisma.catCondition.create({
+      data: {
+        catId,
+        conditionType: requireString(req.body.conditionType, "conditionType"),
+        conditionName: requireString(req.body.conditionName, "conditionName"),
+        severity: typeof req.body.severity === "string" ? req.body.severity : undefined,
+        diagnosedOn: optionalDate(req.body.diagnosedOn),
+        status: typeof req.body.status === "string" ? req.body.status : "active",
+        notes: typeof req.body.notes === "string" ? req.body.notes : undefined,
+        isSensitive: normalizeSensitiveFlag(req.body),
+        createdBy: ownerId,
+      },
+    });
+    await recalculateCatCostForecasts(prisma, catId);
+    ok(res, condition, 201);
+  }),
+);
+
+appRoutes.patch(
+  "/cat-conditions/:conditionId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const conditionId = parseId(req.params.conditionId, "conditionId");
+    const existing = await requireCatConditionWriteAccess(ownerId, conditionId);
+    const condition = await prisma.catCondition.update({
+      where: { id: conditionId },
+      data: {
+        conditionType: typeof req.body.conditionType === "string" ? req.body.conditionType : undefined,
+        conditionName: typeof req.body.conditionName === "string" ? req.body.conditionName : undefined,
+        severity: typeof req.body.severity === "string" ? req.body.severity : undefined,
+        diagnosedOn: patchOptionalDate(req.body, "diagnosedOn"),
+        status: typeof req.body.status === "string" ? req.body.status : undefined,
+        notes: typeof req.body.notes === "string" ? req.body.notes : undefined,
+        isSensitive: req.body.isSensitive === undefined ? undefined : normalizeSensitiveFlag(req.body),
+      },
+    });
+    await recalculateCatCostForecasts(prisma, existing.catId);
+    ok(res, condition);
+  }),
+);
+
+appRoutes.delete(
+  "/cat-conditions/:conditionId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const conditionId = parseId(req.params.conditionId, "conditionId");
+    const existing = await requireCatConditionWriteAccess(ownerId, conditionId);
+    await prisma.catCondition.delete({ where: { id: conditionId } });
+    await recalculateCatCostForecasts(prisma, existing.catId);
+    ok(res, { deleted: true });
+  }),
+);
+
+appRoutes.get(
+  "/cats/:catId/medications",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    const { role } = await catAccessContext(ownerId, catId);
+    const onlyActive = req.query.active === "true";
+    const medications = await prisma.catMedication.findMany({
+      where: { catId, ...sensitiveRecordWhere(role, ownerId), isActive: onlyActive ? true : undefined },
+      orderBy: [{ isActive: "desc" }, { updatedAt: "desc" }],
+    });
+    const users = await loadCatUserDirectory(catId, medications.map((m) => m.createdBy));
+    ok(res, medications.map((m) => recordResponse(m, ownerId, role, users)));
+  }),
+);
+
+appRoutes.post(
+  "/cats/:catId/medications",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    await requireCatWriteAccess(ownerId, catId);
+    const medication = await prisma.catMedication.create({
+      data: {
+        catId,
+        medicationName: requireString(req.body.medicationName, "medicationName"),
+        dosage: typeof req.body.dosage === "string" ? req.body.dosage : undefined,
+        frequencyText: typeof req.body.frequencyText === "string" ? req.body.frequencyText : undefined,
+        startedOn: patchOptionalDate(req.body, "startedOn"),
+        endedOn: patchOptionalDate(req.body, "endedOn"),
+        prescribedBy: typeof req.body.prescribedBy === "string" ? req.body.prescribedBy : undefined,
+        isActive: req.body.isActive !== false,
+        notes: typeof req.body.notes === "string" ? req.body.notes : undefined,
+        isSensitive: normalizeSensitiveFlag(req.body),
+        createdBy: ownerId,
+      },
+    });
+    await recalculateCatCostForecasts(prisma, catId);
+    ok(res, medication, 201);
+  }),
+);
+
+appRoutes.patch(
+  "/cat-medications/:medicationId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const medicationId = parseId(req.params.medicationId, "medicationId");
+    const existing = await requireCatMedicationWriteAccess(ownerId, medicationId);
+    const medication = await prisma.catMedication.update({
+      where: { id: medicationId },
+      data: {
+        medicationName: typeof req.body.medicationName === "string" ? req.body.medicationName : undefined,
+        dosage: typeof req.body.dosage === "string" ? req.body.dosage : undefined,
+        frequencyText: typeof req.body.frequencyText === "string" ? req.body.frequencyText : undefined,
+        startedOn: optionalDate(req.body.startedOn),
+        endedOn: optionalDate(req.body.endedOn),
+        prescribedBy: typeof req.body.prescribedBy === "string" ? req.body.prescribedBy : undefined,
+        isActive: typeof req.body.isActive === "boolean" ? req.body.isActive : undefined,
+        notes: typeof req.body.notes === "string" ? req.body.notes : undefined,
+        isSensitive: req.body.isSensitive === undefined ? undefined : normalizeSensitiveFlag(req.body),
+      },
+    });
+    await recalculateCatCostForecasts(prisma, existing.catId);
+    ok(res, medication);
+  }),
+);
+
+appRoutes.delete(
+  "/cat-medications/:medicationId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const medicationId = parseId(req.params.medicationId, "medicationId");
+    const existing = await requireCatMedicationWriteAccess(ownerId, medicationId);
+    await prisma.catMedication.delete({ where: { id: medicationId } });
+    await recalculateCatCostForecasts(prisma, existing.catId);
+    ok(res, { deleted: true });
+  }),
+);
+
+appRoutes.post(
+  "/cats/:catId/care-schedules/generate",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    await requireCatWriteAccess(ownerId, catId);
+    const generatedCount = await generateDefaultCatCareSchedules(
+      prisma,
+      catId,
+      optionalDate(req.body.baseDate) ?? new Date(),
+      ownerId,
+    );
+    ok(res, { generatedCount }, 201);
+  }),
+);
+
+appRoutes.get(
+  "/cats/:catId/care-schedules",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    const { role } = await catAccessContext(ownerId, catId);
+    const schedules = await prisma.catCareSchedule.findMany({
+      where: {
+        catId,
+        status: typeof req.query.status === "string" ? req.query.status : undefined,
+        dueDate: {
+          gte: typeof req.query.from === "string" ? new Date(req.query.from) : undefined,
+          lte: typeof req.query.to === "string" ? new Date(req.query.to) : undefined,
+        },
+      },
+      orderBy: { dueDate: "asc" },
+    });
+    const users = await loadCatUserDirectory(catId, schedules.flatMap((s) => [s.createdBy, s.assignedTo]));
+    ok(res, schedules.map((s) => careScheduleResponse(s as Parameters<typeof careScheduleResponse>[0], ownerId, role, users)));
+  }),
+);
+
+appRoutes.post(
+  "/cats/:catId/care-schedules",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    await requireCatWriteAccess(ownerId, catId);
+    const { role } = await catAccessContext(ownerId, catId);
+    const assignedTo = await parseAssignableUserIdForCat(req.body.assignedToUserId ?? req.body.assignedTo, catId);
+    const schedule = await prisma.catCareSchedule.create({
+      data: {
+        catId,
+        scheduleType: requireString(req.body.scheduleType, "scheduleType"),
+        title: requireString(req.body.title, "title"),
+        description: typeof req.body.description === "string" ? req.body.description : undefined,
+        dueDate: optionalDate(req.body.dueDate) ?? new Date(),
+        repeatCycleDays: typeof req.body.repeatCycleDays === "number" ? req.body.repeatCycleDays : undefined,
+        priority: typeof req.body.priority === "string" ? req.body.priority : "medium",
+        sourceType: typeof req.body.sourceType === "string" ? req.body.sourceType : "manual",
+        createdBy: ownerId,
+        assignedTo: assignedTo === undefined ? ownerId : assignedTo,
+      },
+    });
+    const users = await loadCatUserDirectory(catId, [schedule.createdBy, schedule.assignedTo]);
+    ok(res, careScheduleResponse(schedule as Parameters<typeof careScheduleResponse>[0], ownerId, role, users), 201);
+  }),
+);
+
+appRoutes.get(
+  "/cat-care-schedules/:scheduleId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const scheduleId = parseId(req.params.scheduleId, "scheduleId");
+    const schedule = await requireCatScheduleAccess(ownerId, scheduleId);
+    const { role } = await catAccessContext(ownerId, schedule.catId);
+    const users = await loadCatUserDirectory(schedule.catId, [schedule.createdBy, schedule.assignedTo]);
+    ok(res, careScheduleResponse(schedule as Parameters<typeof careScheduleResponse>[0], ownerId, role, users));
+  }),
+);
+
+appRoutes.patch(
+  "/cat-care-schedules/:scheduleId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const scheduleId = parseId(req.params.scheduleId, "scheduleId");
+    const existing = await requireCatScheduleWriteAccess(ownerId, scheduleId);
+    const { role } = await catAccessContext(ownerId, existing.catId);
+    const assignedTo = await parseAssignableUserIdForCat(req.body.assignedToUserId ?? req.body.assignedTo, existing.catId);
+    const schedule = await prisma.catCareSchedule.update({
+      where: { id: scheduleId },
+      data: {
+        title: typeof req.body.title === "string" ? req.body.title : undefined,
+        description: typeof req.body.description === "string" ? req.body.description : undefined,
+        dueDate: optionalDate(req.body.dueDate),
+        scheduleType: typeof req.body.scheduleType === "string" ? req.body.scheduleType : undefined,
+        repeatCycleDays: req.body.repeatCycleDays === null ? null : typeof req.body.repeatCycleDays === "number" ? req.body.repeatCycleDays : undefined,
+        priority: typeof req.body.priority === "string" ? req.body.priority : undefined,
+        reminderEnabled: typeof req.body.reminderEnabled === "boolean" ? req.body.reminderEnabled : undefined,
+        assignedTo,
+      },
+    });
+    const users = await loadCatUserDirectory(existing.catId, [schedule.createdBy, schedule.assignedTo]);
+    ok(res, careScheduleResponse(schedule as Parameters<typeof careScheduleResponse>[0], ownerId, role, users));
+  }),
+);
+
+appRoutes.post(
+  "/cat-care-schedules/:scheduleId/complete",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const scheduleId = parseId(req.params.scheduleId, "scheduleId");
+    const existing = await requireCatScheduleWriteAccess(ownerId, scheduleId);
+    const { role } = await catAccessContext(ownerId, existing.catId);
+    if (existing.status !== "pending") {
+      const users = await loadCatUserDirectory(existing.catId, [existing.createdBy, existing.assignedTo]);
+      ok(res, careScheduleResponse(existing as Parameters<typeof careScheduleResponse>[0], ownerId, role, users));
+      return;
+    }
+    const completedAt = optionalDate(req.body.completedAt) ?? new Date();
+    const schedule = await prisma.catCareSchedule.update({ where: { id: scheduleId }, data: { status: "completed", completedAt } });
+    await createNextRecurringCatSchedule(existing, ownerId);
+    const users = await loadCatUserDirectory(existing.catId, [schedule.createdBy, schedule.assignedTo]);
+    ok(res, careScheduleResponse(schedule as Parameters<typeof careScheduleResponse>[0], ownerId, role, users));
+  }),
+);
+
+appRoutes.post(
+  "/cat-care-schedules/:scheduleId/skip",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const scheduleId = parseId(req.params.scheduleId, "scheduleId");
+    const existing = await requireCatScheduleWriteAccess(ownerId, scheduleId);
+    const { role } = await catAccessContext(ownerId, existing.catId);
+    if (existing.status !== "pending") {
+      const users = await loadCatUserDirectory(existing.catId, [existing.createdBy, existing.assignedTo]);
+      ok(res, careScheduleResponse(existing as Parameters<typeof careScheduleResponse>[0], ownerId, role, users));
+      return;
+    }
+    const schedule = await prisma.catCareSchedule.update({ where: { id: scheduleId }, data: { status: "skipped" } });
+    await createNextRecurringCatSchedule(existing, ownerId);
+    const users = await loadCatUserDirectory(existing.catId, [schedule.createdBy, schedule.assignedTo]);
+    ok(res, careScheduleResponse(schedule as Parameters<typeof careScheduleResponse>[0], ownerId, role, users));
+  }),
+);
+
+appRoutes.get(
+  "/cats/:catId/timeline",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    const { role } = await catAccessContext(ownerId, catId);
+    const { page, pageSize, skip } = parsePaging(req as AuthedRequest);
+    const type = timelineType(req.query.type);
+    const from = optionalDate(req.query.from);
+    const to = optionalDate(req.query.to);
+    const take = skip + pageSize;
+    const dateFilter = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+    const recordVisibility = sensitiveRecordWhere(role, ownerId);
+    const healthWhere = { catId, ...recordVisibility, recordedAt: dateFilter };
+    const visitWhere = { catId, ...recordVisibility, visitDate: dateFilter };
+    const expenseWhere = { catId, ...recordVisibility, expenseDate: dateFilter };
+
+    const [logs, visits, expenses, healthTotal, visitTotal, expenseTotal] = await Promise.all([
+      type === "all" || type === "health_log" ? prisma.catHealthLog.findMany({ where: healthWhere, orderBy: { recordedAt: "desc" }, take }) : [],
+      type === "all" || type === "medical_visit" ? prisma.catMedicalVisit.findMany({ where: visitWhere, orderBy: { visitDate: "desc" }, include: { _count: { select: { attachments: true } } }, take }) : [],
+      type === "all" || type === "expense" ? prisma.catExpense.findMany({ where: expenseWhere, orderBy: { expenseDate: "desc" }, take }) : [],
+      type === "all" || type === "health_log" ? prisma.catHealthLog.count({ where: healthWhere }) : 0,
+      type === "all" || type === "medical_visit" ? prisma.catMedicalVisit.count({ where: visitWhere }) : 0,
+      type === "all" || type === "expense" ? prisma.catExpense.count({ where: expenseWhere }) : 0,
+    ]);
+
+    const items = [
+      ...logs.map((log) => ({ itemType: "health_log", id: log.id, logType: log.logType, title: log.title, eventAt: log.recordedAt, summary: log.valueNumeric !== null && log.valueNumeric !== undefined ? `${log.valueNumeric}${log.valueUnit ?? ""}` : log.memo, collaboration: collaborationMeta({ record: log, viewerId: ownerId, accessRole: role }) })),
+      ...visits.map((visit) => ({ itemType: "medical_visit", id: visit.id, eventAt: visit.visitDate, title: `${visit.hospitalName} 방문`, summary: visit.visitReason ?? visit.diagnosis, hospitalName: visit.hospitalName, attachmentCount: visit._count.attachments, collaboration: collaborationMeta({ record: visit, viewerId: ownerId, accessRole: role }) })),
+      ...expenses.map((expense) => ({ itemType: "expense", id: expense.id, eventAt: expense.expenseDate, title: `${expense.expenseCategory} 지출`, summary: expense.vendorName ?? expense.memo, expenseCategory: expense.expenseCategory, amount: expense.amount, collaboration: collaborationMeta({ record: expense, viewerId: ownerId, accessRole: role }) })),
+    ].sort((a, b) => new Date(b.eventAt).getTime() - new Date(a.eventAt).getTime());
+
+    ok(res, { items: items.slice(skip, skip + pageSize), page, pageSize, total: healthTotal + visitTotal + expenseTotal, type });
+  }),
+);
+
+appRoutes.get(
+  "/cats/:catId/health-logs",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    const { role } = await catAccessContext(ownerId, catId);
+    const { page, pageSize, skip } = parsePaging(req as AuthedRequest);
+    const where = { catId, ...sensitiveRecordWhere(role, ownerId), logType: typeof req.query.type === "string" ? req.query.type : undefined };
+    const [items, total] = await Promise.all([
+      prisma.catHealthLog.findMany({ where, orderBy: { recordedAt: "desc" }, skip, take: pageSize }),
+      prisma.catHealthLog.count({ where }),
+    ]);
+    const users = await loadCatUserDirectory(catId, items.map((item) => item.createdBy));
+    ok(res, { items: items.map((item) => recordResponse(item, ownerId, role, users)), page, pageSize, total });
+  }),
+);
+
+appRoutes.post(
+  "/cats/:catId/health-logs",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    await requireCatWriteAccess(ownerId, catId);
+    const { role } = await catAccessContext(ownerId, catId);
+    const log = await prisma.catHealthLog.create({
+      data: {
+        catId,
+        logType: requireString(req.body.logType, "logType"),
+        title: typeof req.body.title === "string" ? req.body.title : undefined,
+        recordedAt: optionalDate(req.body.recordedAt) ?? new Date(),
+        valueNumeric: optionalNumber(req.body.valueNumeric),
+        valueUnit: typeof req.body.valueUnit === "string" ? req.body.valueUnit : undefined,
+        memo: typeof req.body.memo === "string" ? req.body.memo : undefined,
+        metadata: req.body.metadata === undefined ? Prisma.JsonNull : req.body.metadata,
+        isSensitive: normalizeSensitiveFlag(req.body),
+        createdBy: ownerId,
+      },
+    });
+    const users = await loadCatUserDirectory(catId, [log.createdBy]);
+    ok(res, recordResponse(log, ownerId, role, users), 201);
+  }),
+);
+
+appRoutes.get(
+  "/cat-health-logs/:logId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const log = await requireCatHealthLogAccess(ownerId, parseId(req.params.logId, "logId"));
+    const { role } = await catAccessContext(ownerId, log.catId);
+    const users = await loadCatUserDirectory(log.catId, [log.createdBy]);
+    ok(res, recordResponse(log, ownerId, role, users));
+  }),
+);
+
+appRoutes.patch(
+  "/cat-health-logs/:logId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const logId = parseId(req.params.logId, "logId");
+    const existing = await requireCatHealthLogWriteAccess(ownerId, logId);
+    const { role } = await catAccessContext(ownerId, existing.catId);
+    const log = await prisma.catHealthLog.update({
+      where: { id: logId },
+      data: {
+        logType: typeof req.body.logType === "string" ? req.body.logType : undefined,
+        title: typeof req.body.title === "string" ? req.body.title : undefined,
+        recordedAt: optionalDate(req.body.recordedAt),
+        valueNumeric: optionalNumber(req.body.valueNumeric),
+        valueUnit: typeof req.body.valueUnit === "string" ? req.body.valueUnit : undefined,
+        memo: typeof req.body.memo === "string" ? req.body.memo : undefined,
+        metadata: req.body.metadata === undefined ? undefined : req.body.metadata,
+        isSensitive: req.body.isSensitive === undefined ? undefined : normalizeSensitiveFlag(req.body),
+      },
+    });
+    const users = await loadCatUserDirectory(existing.catId, [log.createdBy]);
+    ok(res, recordResponse(log, ownerId, role, users));
+  }),
+);
+
+appRoutes.delete(
+  "/cat-health-logs/:logId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const logId = parseId(req.params.logId, "logId");
+    await requireCatHealthLogWriteAccess(ownerId, logId);
+    await prisma.catHealthLog.delete({ where: { id: logId } });
+    ok(res, { deleted: true });
+  }),
+);
+
+appRoutes.get(
+  "/cats/:catId/medical-visits",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    const { role } = await catAccessContext(ownerId, catId);
+    const { page, pageSize, skip } = parsePaging(req as AuthedRequest);
+    const [items, total] = await Promise.all([
+      prisma.catMedicalVisit.findMany({ where: { catId, ...sensitiveRecordWhere(role, ownerId) }, orderBy: { visitDate: "desc" }, include: { attachments: { orderBy: { createdAt: "desc" } } }, skip, take: pageSize }),
+      prisma.catMedicalVisit.count({ where: { catId, ...sensitiveRecordWhere(role, ownerId) } }),
+    ]);
+    const users = await loadCatUserDirectory(catId, items.map((item) => item.createdBy));
+    ok(res, { items: items.map((item) => recordResponse(item, ownerId, role, users)), page, pageSize, total });
+  }),
+);
+
+appRoutes.post(
+  "/cats/:catId/medical-visits",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    await requireCatWriteAccess(ownerId, catId);
+    const result = await prisma.$transaction(async (tx) => {
+      const visit = await tx.catMedicalVisit.create({
+        data: {
+          catId,
+          hospitalName: requireString(req.body.hospitalName, "hospitalName"),
+          veterinarianName: typeof req.body.veterinarianName === "string" ? req.body.veterinarianName : undefined,
+          visitDate: optionalDate(req.body.visitDate) ?? new Date(),
+          visitReason: typeof req.body.visitReason === "string" ? req.body.visitReason : undefined,
+          symptoms: typeof req.body.symptoms === "string" ? req.body.symptoms : undefined,
+          diagnosis: typeof req.body.diagnosis === "string" ? req.body.diagnosis : undefined,
+          treatment: typeof req.body.treatment === "string" ? req.body.treatment : undefined,
+          prescribedItems: typeof req.body.prescribedItems === "string" ? req.body.prescribedItems : undefined,
+          followUpDate: optionalDate(req.body.followUpDate),
+          notes: typeof req.body.notes === "string" ? req.body.notes : undefined,
+          isSensitive: normalizeSensitiveFlag(req.body),
+          createdBy: ownerId,
+        },
+      });
+      let expenseId: bigint | null = null;
+      if (req.body.expense?.create === true) {
+        const expense = await tx.catExpense.create({
+          data: {
+            catId,
+            medicalVisitId: visit.id,
+            expenseCategory: "hospital",
+            amount: Number(req.body.expense.amount ?? 0),
+            expenseDate: optionalDate(req.body.expense.expenseDate) ?? new Date(),
+            vendorName: typeof req.body.expense.vendorName === "string" ? req.body.expense.vendorName : req.body.hospitalName,
+            memo: typeof req.body.expense.memo === "string" ? req.body.expense.memo : undefined,
+            isSensitive: visit.isSensitive,
+            createdBy: ownerId,
+          },
+        });
+        expenseId = expense.id;
+        await recalculateCatCostForecasts(tx, catId);
+      }
+      return { id: visit.id, expenseId };
+    });
+    ok(res, result, 201);
+  }),
+);
+
+appRoutes.get(
+  "/cat-medical-visits/:visitId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const visitId = parseId(req.params.visitId, "visitId");
+    await requireCatMedicalVisitAccess(ownerId, visitId);
+    const visit = await prisma.catMedicalVisit.findUnique({ where: { id: visitId }, include: { attachments: { orderBy: { createdAt: "desc" } } } });
+    if (!visit) throw new HttpError(404, "NOT_FOUND", "medical visit not found");
+    const { role } = await catAccessContext(ownerId, visit.catId);
+    const users = await loadCatUserDirectory(visit.catId, [visit.createdBy]);
+    ok(res, recordResponse(visit, ownerId, role, users));
+  }),
+);
+
+appRoutes.get(
+  "/cat-medical-visits/:visitId/attachments",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const visitId = parseId(req.params.visitId, "visitId");
+    await requireCatMedicalVisitAccess(ownerId, visitId);
+    const attachments = await prisma.catMedicalVisitAttachment.findMany({ where: { medicalVisitId: visitId }, orderBy: { createdAt: "desc" } });
+    ok(res, attachments);
+  }),
+);
+
+appRoutes.post(
+  "/cat-medical-visits/:visitId/attachments",
+  catAttachmentUpload.single("file"),
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const visitId = parseId(req.params.visitId, "visitId");
+    await requireCatMedicalVisitWriteAccess(ownerId, visitId);
+    if (!req.file) throw new HttpError(400, "VALIDATION_ERROR", "file is required");
+    const fileUrl = `cat-medical-visits/${req.file.filename}`;
+    const attachment = await prisma.catMedicalVisitAttachment.create({
+      data: {
+        medicalVisitId: visitId,
+        fileType: normalizeAttachmentType(req.body.fileType),
+        fileUrl,
+        originalFilename: req.file.originalname,
+        mimeType: req.file.mimetype,
+        fileSizeBytes: req.file.size,
+        uploadedBy: ownerId,
+      },
+    });
+    ok(res, attachment, 201);
+  }),
+);
+
+appRoutes.get(
+  "/cat-attachments/:attachmentId/download",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const attachmentId = parseId(req.params.attachmentId, "attachmentId");
+    const attachment = await requireCatAttachmentAccess(ownerId, attachmentId);
+    const absolutePath = resolveUploadPath(attachment.fileUrl);
+    if (!fs.existsSync(absolutePath)) throw new HttpError(404, "NOT_FOUND", "attachment file not found");
+    res.download(absolutePath, attachment.originalFilename ?? path.basename(attachment.fileUrl));
+  }),
+);
+
+appRoutes.delete(
+  "/cat-attachments/:attachmentId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const attachmentId = parseId(req.params.attachmentId, "attachmentId");
+    const attachment = await requireCatAttachmentWriteAccess(ownerId, attachmentId);
+    await prisma.catMedicalVisitAttachment.delete({ where: { id: attachmentId } });
+    await deleteAttachmentFile(attachment.fileUrl);
+    ok(res, { deleted: true });
+  }),
+);
+
+appRoutes.patch(
+  "/cat-medical-visits/:visitId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const visitId = parseId(req.params.visitId, "visitId");
+    const existing = await requireCatMedicalVisitWriteAccess(ownerId, visitId);
+    const { role } = await catAccessContext(ownerId, existing.catId);
+    const visit = await prisma.catMedicalVisit.update({
+      where: { id: visitId },
+      data: {
+        hospitalName: typeof req.body.hospitalName === "string" ? req.body.hospitalName : undefined,
+        veterinarianName: typeof req.body.veterinarianName === "string" ? req.body.veterinarianName : undefined,
+        visitDate: optionalDate(req.body.visitDate),
+        visitReason: typeof req.body.visitReason === "string" ? req.body.visitReason : undefined,
+        symptoms: typeof req.body.symptoms === "string" ? req.body.symptoms : undefined,
+        diagnosis: typeof req.body.diagnosis === "string" ? req.body.diagnosis : undefined,
+        treatment: typeof req.body.treatment === "string" ? req.body.treatment : undefined,
+        prescribedItems: typeof req.body.prescribedItems === "string" ? req.body.prescribedItems : undefined,
+        followUpDate: optionalDate(req.body.followUpDate),
+        notes: typeof req.body.notes === "string" ? req.body.notes : undefined,
+        isSensitive: req.body.isSensitive === undefined ? undefined : normalizeSensitiveFlag(req.body),
+      },
+    });
+    const users = await loadCatUserDirectory(existing.catId, [visit.createdBy]);
+    ok(res, recordResponse(visit, ownerId, role, users));
+  }),
+);
+
+appRoutes.delete(
+  "/cat-medical-visits/:visitId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const visitId = parseId(req.params.visitId, "visitId");
+    const existing = await requireCatMedicalVisitWriteAccess(ownerId, visitId);
+    const attachments = await prisma.catMedicalVisitAttachment.findMany({ where: { medicalVisitId: visitId } });
+    await prisma.$transaction(async (tx) => {
+      await tx.catExpense.updateMany({ where: { medicalVisitId: visitId }, data: { medicalVisitId: null } });
+      await tx.catMedicalVisit.delete({ where: { id: visitId } });
+      await recalculateCatCostForecasts(tx, existing.catId);
+    });
+    await Promise.all(attachments.map((a) => deleteAttachmentFile(a.fileUrl)));
+    ok(res, { deleted: true });
+  }),
+);
+
+appRoutes.get(
+  "/cats/:catId/expenses",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    const { role } = await catAccessContext(ownerId, catId);
+    const { page, pageSize, skip } = parsePaging(req as AuthedRequest);
+    const where = {
+      catId,
+      ...sensitiveRecordWhere(role, ownerId),
+      expenseCategory: typeof req.query.category === "string" ? req.query.category : undefined,
+      expenseDate: { gte: typeof req.query.from === "string" ? new Date(req.query.from) : undefined, lte: typeof req.query.to === "string" ? new Date(req.query.to) : undefined },
+    };
+    const [items, total] = await Promise.all([
+      prisma.catExpense.findMany({ where, orderBy: { expenseDate: "desc" }, skip, take: pageSize }),
+      prisma.catExpense.count({ where }),
+    ]);
+    const users = await loadCatUserDirectory(catId, items.map((item) => item.createdBy));
+    ok(res, { items: items.map((item) => recordResponse(item, ownerId, role, users)), page, pageSize, total });
+  }),
+);
+
+appRoutes.post(
+  "/cats/:catId/expenses",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    await requireCatWriteAccess(ownerId, catId);
+    const { role } = await catAccessContext(ownerId, catId);
+    const expense = await prisma.catExpense.create({
+      data: {
+        catId,
+        medicalVisitId: req.body.medicalVisitId ? BigInt(req.body.medicalVisitId) : undefined,
+        expenseCategory: requireString(req.body.expenseCategory, "expenseCategory"),
+        amount: Number(req.body.amount),
+        expenseDate: optionalDate(req.body.expenseDate) ?? new Date(),
+        vendorName: typeof req.body.vendorName === "string" ? req.body.vendorName : undefined,
+        memo: typeof req.body.memo === "string" ? req.body.memo : undefined,
+        isSensitive: normalizeSensitiveFlag(req.body),
+        createdBy: ownerId,
+      },
+    });
+    await recalculateCatCostForecasts(prisma, catId);
+    const users = await loadCatUserDirectory(catId, [expense.createdBy]);
+    ok(res, recordResponse(expense, ownerId, role, users), 201);
+  }),
+);
+
+appRoutes.get(
+  "/cats/:catId/expenses/summary",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    await requireCatAccess(ownerId, catId);
+    const { role } = await catAccessContext(ownerId, catId);
+    const year = Number(req.query.year ?? new Date().getFullYear());
+    const month = Number(req.query.month ?? new Date().getMonth() + 1);
+    const start = new Date(year, month - 1, 1);
+    const end = new Date(year, month, 0);
+    const expenses = await prisma.catExpense.findMany({ where: { catId, ...sensitiveRecordWhere(role, ownerId), expenseDate: { gte: start, lte: end } } });
+    const byCategory = Object.values(
+      expenses.reduce<Record<string, { category: string; amount: number }>>((acc, e) => {
+        acc[e.expenseCategory] ??= { category: e.expenseCategory, amount: 0 };
+        acc[e.expenseCategory].amount += Number(e.amount);
+        return acc;
+      }, {}),
+    );
+    ok(res, { totalAmount: byCategory.reduce((sum, item) => sum + item.amount, 0), byCategory });
+  }),
+);
+
+appRoutes.get(
+  "/cat-expenses/:expenseId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const expense = await requireCatExpenseAccess(ownerId, parseId(req.params.expenseId, "expenseId"));
+    const { role } = await catAccessContext(ownerId, expense.catId);
+    const users = await loadCatUserDirectory(expense.catId, [expense.createdBy]);
+    ok(res, recordResponse(expense, ownerId, role, users));
+  }),
+);
+
+appRoutes.patch(
+  "/cat-expenses/:expenseId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const expenseId = parseId(req.params.expenseId, "expenseId");
+    const existing = await requireCatExpenseWriteAccess(ownerId, expenseId);
+    const { role } = await catAccessContext(ownerId, existing.catId);
+    const expense = await prisma.catExpense.update({
+      where: { id: expenseId },
+      data: {
+        expenseCategory: typeof req.body.expenseCategory === "string" ? req.body.expenseCategory : undefined,
+        amount: req.body.amount !== undefined ? Number(req.body.amount) : undefined,
+        expenseDate: optionalDate(req.body.expenseDate),
+        vendorName: typeof req.body.vendorName === "string" ? req.body.vendorName : undefined,
+        memo: typeof req.body.memo === "string" ? req.body.memo : undefined,
+        isSensitive: req.body.isSensitive === undefined ? undefined : normalizeSensitiveFlag(req.body),
+      },
+    });
+    await recalculateCatCostForecasts(prisma, existing.catId);
+    const users = await loadCatUserDirectory(existing.catId, [expense.createdBy]);
+    ok(res, recordResponse(expense, ownerId, role, users));
+  }),
+);
+
+appRoutes.delete(
+  "/cat-expenses/:expenseId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const expenseId = parseId(req.params.expenseId, "expenseId");
+    const existing = await requireCatExpenseWriteAccess(ownerId, expenseId);
+    await prisma.catExpense.delete({ where: { id: expenseId } });
+    await recalculateCatCostForecasts(prisma, existing.catId);
+    ok(res, { deleted: true });
+  }),
+);
+
+appRoutes.get(
+  "/cats/:catId/cost-forecasts/latest",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    await requireCatAccess(ownerId, catId);
+    const forecasts = await latestCatForecasts(prisma, catId);
+    ok(res, {
+      basic: forecastResponse(forecasts.basic as any), // eslint-disable-line @typescript-eslint/no-explicit-any
+      caution: forecastResponse(forecasts.caution as any), // eslint-disable-line @typescript-eslint/no-explicit-any
+      highRisk: forecastResponse(forecasts.highRisk as any), // eslint-disable-line @typescript-eslint/no-explicit-any
+      generatedAt: forecasts.generatedAt,
+    });
+  }),
+);
+
+appRoutes.post(
+  "/cats/:catId/cost-forecasts/recalculate",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    await requireCatWriteAccess(ownerId, catId);
+    const generatedCount = await recalculateCatCostForecasts(prisma, catId);
+    ok(res, { generatedCount }, 201);
+  }),
+);
+
+appRoutes.get(
+  "/cats/:catId/cost-forecasts/history",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    await requireCatAccess(ownerId, catId);
+    const { page, pageSize, skip } = parsePaging(req as AuthedRequest);
+    const [items, total] = await Promise.all([
+      prisma.catCostForecast.findMany({ where: { catId }, orderBy: { generatedAt: "desc" }, skip, take: pageSize }),
+      prisma.catCostForecast.count({ where: { catId } }),
+    ]);
+    ok(res, { items, page, pageSize, total });
+  }),
+);
+
+appRoutes.post(
+  "/cats/:catId/visit-reports",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    await requireCatWriteAccess(ownerId, catId);
+    const report = await buildCatVisitReport(prisma, catId, ownerId);
+    ok(res, { id: report.id, title: report.title }, 201);
+  }),
+);
+
+appRoutes.get(
+  "/cats/:catId/visit-reports/latest",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    await requireCatAccess(ownerId, catId);
+    const report = await prisma.catVisitReport.findFirst({ where: { catId }, orderBy: { generatedAt: "desc" } });
+    ok(res, catVisitReportResponse(report));
+  }),
+);
+
+appRoutes.get(
+  "/cats/:catId/visit-reports",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const catId = parseId(req.params.catId, "catId");
+    await requireCatAccess(ownerId, catId);
+    const { page, pageSize, skip } = parsePaging(req as AuthedRequest);
+    const [items, total] = await Promise.all([
+      prisma.catVisitReport.findMany({ where: { catId }, orderBy: { generatedAt: "desc" }, skip, take: pageSize }),
+      prisma.catVisitReport.count({ where: { catId } }),
+    ]);
+    ok(res, { items: items.map(catVisitReportResponse), page, pageSize, total });
+  }),
+);
+
+appRoutes.get(
+  "/cat-visit-reports/:reportId",
+  asyncHandler(async (req, res) => {
+    const ownerId = userId(req as AuthedRequest);
+    const reportId = parseId(req.params.reportId, "reportId");
+    const report = await prisma.catVisitReport.findUnique({ where: { id: reportId } });
+    if (!report) throw new HttpError(404, "NOT_FOUND", "visit report not found");
+    await requireCatAccess(ownerId, report.catId);
+    ok(res, catVisitReportResponse(report));
   }),
 );

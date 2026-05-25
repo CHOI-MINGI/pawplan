@@ -2097,6 +2097,392 @@ export async function recalculateCostForecasts(tx: Tx, dogId: bigint) {
   return scenarios.length;
 }
 
+const catRecurringCostReference = {
+  monthlyTotal: 120000,
+  foodShare: 0.55,
+  suppliesShare: 0.125,
+  groomingShare: 0.04,
+  source: {
+    label: "KB 2025 반려동물 보고서 고양이 기준 추정",
+    url: "https://kbthink.com/investment/deepdive/research/250629-1.html",
+  },
+};
+
+const catTreatmentCostReference = {
+  averageTwoYearCost: 850000,
+  monthlyReserve: 850000 / 24,
+  source: {
+    label: "KB 2025 반려동물 보고서 고양이 기준 추정",
+    url: "https://kbthink.com/investment/deepdive/research/250629-1.html",
+  },
+};
+
+const catLifespanYears = 15;
+
+function catAgeStage(age: number) {
+  if (age < 1) return "kitten";
+  if (age >= 12) return "senior_plus";
+  if (age >= 8) return "senior";
+  return "adult";
+}
+
+function catAgeStageLabel(age: number) {
+  return (
+    {
+      kitten: "성장기",
+      adult: "성묘기",
+      senior: "시니어",
+      senior_plus: "고령묘",
+    } as const
+  )[catAgeStage(age)];
+}
+
+function catAgePlannedCareCost(age: number) {
+  switch (catAgeStage(age)) {
+    case "kitten":
+      return 20000;
+    case "senior_plus":
+      return 18000;
+    case "senior":
+      return 10000;
+    default:
+      return 0;
+  }
+}
+
+function catAgeRiskMultiplier(age: number) {
+  switch (catAgeStage(age)) {
+    case "kitten":
+      return 1.05;
+    case "senior_plus":
+      return 1.3;
+    case "senior":
+      return 1.12;
+    default:
+      return 1.0;
+  }
+}
+
+export async function recalculateCatCostForecasts(tx: Tx, catId: bigint) {
+  const now = new Date();
+  const annualSince = new Date(now.getTime() - 365 * dayMs);
+  const recentSince = new Date(now.getTime() - 90 * dayMs);
+
+  const [cat, conditions, medications, expenses, visits, priorForecasts] =
+    await Promise.all([
+      tx.cat.findUniqueOrThrow({ where: { id: catId } }),
+      tx.catCondition.findMany({
+        where: { catId, status: { in: ["active", "monitoring"] } },
+      }),
+      tx.catMedication.findMany({ where: { catId, isActive: true } }),
+      tx.catExpense.findMany({
+        where: { catId, expenseDate: { gte: annualSince } },
+        orderBy: { expenseDate: "asc" },
+      }),
+      tx.catMedicalVisit.findMany({
+        where: { catId, visitDate: { gte: annualSince } },
+        orderBy: { visitDate: "asc" },
+        select: { visitDate: true },
+      }),
+      tx.catCostForecast.findMany({
+        where: { catId, scenario: "basic", generatedAt: { lt: now } },
+        orderBy: { generatedAt: "desc" },
+        take: 18,
+        select: { generatedAt: true, monthlyEstimate: true },
+      }),
+    ]);
+
+  const catAge = ageYears(cat.birthDate, now);
+  const weightKg = Number(cat.currentWeightKg ?? 4);
+  const targetWeightKg = Number(cat.targetWeightKg ?? cat.currentWeightKg ?? 0);
+  const isOverweight = targetWeightKg > 0 && weightKg > targetWeightKg * 1.1;
+
+  const recentVisitCount = visits.filter((v) => v.visitDate >= recentSince).length;
+  const annualVisitCount = visits.length;
+  const remainingLifetimeYears = Math.max(1, catLifespanYears - catAge);
+
+  const expenseClassification = classifyExpenses(expenses, now);
+  const fixedExpenses = expenseClassification.coreFixedExpenses;
+  const insuranceExpenses = expenseClassification.insuranceExpenses;
+  const routineMedicalExpenses = expenseClassification.routineMedicalExpenses;
+  const eventMedicalExpenses = expenseClassification.eventMedicalExpenses;
+  const medicalExpenses = expenseClassification.medicalExpenses;
+  const baselineExpenses = expenseClassification.classified
+    .filter((e) => !e.isOutlier)
+    .map((e) => e as ExpenseRow);
+
+  const fixedStats90 = buildExpenseStats(fixedExpenses, now, 90);
+  const fixedStats365 = buildExpenseStats(fixedExpenses, now, 365);
+  const routineMedicalStats90 = buildExpenseStats(routineMedicalExpenses, now, 90);
+  const routineMedicalStats365 = buildExpenseStats(routineMedicalExpenses, now, 365);
+  const eventMedicalStats90 = buildExpenseStats(eventMedicalExpenses, now, 90);
+  const eventMedicalStats365 = buildExpenseStats(eventMedicalExpenses, now, 365);
+  const medicalStats90 = buildExpenseStats(medicalExpenses, now, 90);
+  const medicalStats365 = buildExpenseStats(medicalExpenses, now, 365);
+  const totalStats365 = buildExpenseStats(baselineExpenses, now, 365);
+
+  const insuranceModelForPremium = buildInsuranceModel({
+    status: cat.insuranceStatus,
+    insuranceExpenses,
+    riskReserveBeforeInsurance: 0,
+  });
+
+  const historicalCoreFixedMonthly = weightedRecentAverage(
+    fixedStats90.averageMonthly,
+    fixedStats365.averageMonthly,
+    0.65,
+  );
+  const historicalFixedMonthly = historicalCoreFixedMonthly + insuranceModelForPremium.monthlyPremium;
+  const historicalRoutineMedicalMonthly = weightedRecentAverage(
+    routineMedicalStats90.averageMonthly,
+    routineMedicalStats365.averageMonthly,
+    0.6,
+  );
+  const historicalEventMedicalMonthly = weightedRecentAverage(
+    eventMedicalStats90.averageMonthly,
+    eventMedicalStats365.averageMonthly,
+    0.5,
+  );
+  const historicalMedicalMonthly = historicalRoutineMedicalMonthly + historicalEventMedicalMonthly;
+  const historicalTotalMonthly = weightedRecentAverage(
+    buildExpenseStats(baselineExpenses, now, 90).averageMonthly,
+    totalStats365.averageMonthly,
+    0.6,
+  );
+
+  const fixedHistoryWeight = historyBlendWeight({
+    stats: fixedStats365.count > 0 ? fixedStats365 : fixedStats90,
+    transactionCount: fixedExpenses.length,
+    targetActiveMonths: 4,
+    maxWeight: 0.82,
+  });
+  const medicalHistoryWeight = historyBlendWeight({
+    stats: medicalStats365.count > 0 ? medicalStats365 : medicalStats90,
+    transactionCount: medicalExpenses.length + annualVisitCount,
+    targetActiveMonths: 4,
+    maxWeight: 0.72,
+  });
+
+  const medicalVolatility = medicalStats365.volatility || medicalStats90.volatility || 0;
+  const routineShare = medicalRoutineShare(
+    medicalVolatility,
+    medicalStats365.activeMonths || medicalStats90.activeMonths,
+    recentVisitCount,
+  );
+  const historicalRoutineMedical = roundMoney(
+    historicalRoutineMedicalMonthly > 0
+      ? historicalRoutineMedicalMonthly
+      : historicalMedicalMonthly * routineShare,
+  );
+  const historicalReserveMedical = roundMoney(
+    Math.max(0, historicalMedicalMonthly - historicalRoutineMedical),
+  );
+
+  const forecastBias = evaluateForecastBias({ forecasts: priorForecasts, expenses, now });
+
+  const baseFoodCost = catRecurringCostReference.monthlyTotal * catRecurringCostReference.foodShare;
+  const baseSuppliesCost = catRecurringCostReference.monthlyTotal * catRecurringCostReference.suppliesShare;
+  const baseGroomingCost = catRecurringCostReference.monthlyTotal * catRecurringCostReference.groomingShare;
+  const basePlannedCareCost = catRecurringCostReference.monthlyTotal - baseFoodCost - baseSuppliesCost - baseGroomingCost;
+  const insurancePremium = insuranceModelForPremium.monthlyPremium;
+  const modeledFixedCost = baseFoodCost + baseSuppliesCost + baseGroomingCost + insurancePremium;
+
+  const fixedCost = blendModeledWithHistory({
+    modeled: modeledFixedCost,
+    actual: historicalFixedMonthly,
+    weight: fixedHistoryWeight,
+    minRatio: 0.7,
+    maxRatio: 1.4,
+  });
+
+  const hasChronic = conditions.some((c) => c.conditionType === "chronic");
+  const conditionCareCost = conditions.length * 6000 + medications.length * 4500 + (hasChronic ? 10000 : 0);
+  const obesityCareCost = isOverweight ? 8000 : 0;
+
+  const modeledPlannedCareCost = roundMoney(
+    basePlannedCareCost + catAgePlannedCareCost(catAge) + conditionCareCost + obesityCareCost,
+  );
+
+  const plannedHistoryAnchor = Math.max(
+    basePlannedCareCost * 0.8,
+    basePlannedCareCost * 0.45 + historicalRoutineMedical,
+  );
+  let plannedCareCost = blendModeledWithHistory({
+    modeled: modeledPlannedCareCost,
+    actual: plannedHistoryAnchor,
+    weight: medicalHistoryWeight * 0.7,
+    minRatio: 0.72,
+    maxRatio: 1.28,
+  });
+
+  const conditionReserveCost = conditions.length * 6000 + medications.length * 4500 + (hasChronic ? 12000 : 0);
+  const visitReserveCost = recentVisitCount >= 2 ? 15000 : recentVisitCount === 1 ? 7000 : 0;
+  const annualVisitPressure = annualVisitCount >= 4 ? 10000 : annualVisitCount >= 2 ? 5000 : 0;
+  const obesityReserveCost = isOverweight ? 10000 : 0;
+  const riskReserveBeforeInsurance = roundMoney(
+    catTreatmentCostReference.monthlyReserve * catAgeRiskMultiplier(catAge)
+      + conditionReserveCost
+      + visitReserveCost
+      + annualVisitPressure
+      + obesityReserveCost,
+  );
+  const insuranceModel = buildInsuranceModel({
+    status: cat.insuranceStatus,
+    insuranceExpenses,
+    riskReserveBeforeInsurance,
+  });
+  const rawOutlierReserveMonthly = expenseClassification.outlierExpenses.reduce(
+    (sum, e) => sum + e.amountNumber,
+    0,
+  ) / 12;
+  const modeledRiskAdjustedCost = roundMoney(riskReserveBeforeInsurance + insuranceModel.reserveOffset);
+  const outlierReserveMonthly = roundMoney(clamp(rawOutlierReserveMonthly, 0, modeledRiskAdjustedCost * 0.45));
+
+  const riskHistoryAnchor = Math.max(
+    modeledRiskAdjustedCost * 0.58,
+    historicalReserveMedical + visitReserveCost + annualVisitPressure,
+  );
+  let riskAdjustedCost = blendModeledWithHistory({
+    modeled: modeledRiskAdjustedCost,
+    actual: riskHistoryAnchor,
+    weight: medicalHistoryWeight,
+    minRatio: 0.7,
+    maxRatio: 1.34,
+  });
+
+  const variableHistoryBiasFactor = 1 + (forecastBias.factor - 1) * forecastBias.strength;
+  if (Math.abs(variableHistoryBiasFactor - 1) >= 0.02) {
+    plannedCareCost = roundMoney(plannedCareCost * variableHistoryBiasFactor);
+    riskAdjustedCost = roundMoney(riskAdjustedCost * variableHistoryBiasFactor);
+  }
+
+  const currentVariableMonthly = plannedCareCost + riskAdjustedCost;
+  const targetVariableFromExperience = Math.max(
+    currentVariableMonthly * 0.7,
+    historicalTotalMonthly > 0 ? historicalTotalMonthly - fixedCost : 0,
+  );
+  const totalAnchorFactor = currentVariableMonthly > 0
+    ? clamp(targetVariableFromExperience / currentVariableMonthly, 0.88, 1.12)
+    : 1;
+  const totalAnchorStrength = clamp(fixedHistoryWeight * 0.1 + medicalHistoryWeight * 0.14, 0, 0.22);
+  const experienceAlignmentFactor = 1 + (totalAnchorFactor - 1) * totalAnchorStrength;
+  if (Math.abs(experienceAlignmentFactor - 1) >= 0.015) {
+    plannedCareCost = roundMoney(plannedCareCost * experienceAlignmentFactor);
+    riskAdjustedCost = roundMoney(riskAdjustedCost * experienceAlignmentFactor);
+  }
+
+  const confidenceLevel = confidenceLevelFor({
+    fixedHistoryWeight,
+    medicalHistoryWeight,
+    biasEvaluationCount: forecastBias.evaluationCount,
+    breedMatchedExactly: false,
+  });
+  const forecastRangeSpread = rangeSpread({
+    confidenceLevel,
+    medicalVolatility,
+    biasEvaluationCount: forecastBias.evaluationCount,
+  });
+
+  const assumptions = {
+    engineVersion: "cat_forecast_v1",
+    calculatedAt: now.toISOString(),
+    ageYears: Number(catAge.toFixed(1)),
+    ageStage: catAgeStageLabel(catAge),
+    weightKg,
+    isOverweight,
+    recentVisitCount,
+    annualVisitCount,
+    recentExpenseCount: expenses.length,
+    activeConditionCount: conditions.length,
+    activeMedicationCount: medications.length,
+    confidenceLevel,
+    catLifespanYears,
+    remainingLifetimeYears: Number(remainingLifetimeYears.toFixed(1)),
+    historyModel: {
+      fixedMonthlyAverage: roundMoney(historicalFixedMonthly),
+      medicalMonthlyAverage: roundMoney(historicalMedicalMonthly),
+      fixedHistoryWeight: Number(fixedHistoryWeight.toFixed(2)),
+      medicalHistoryWeight: Number(medicalHistoryWeight.toFixed(2)),
+      medicalRoutineShare: Number(routineShare.toFixed(2)),
+      forecastBiasFactor: Number(forecastBias.factor.toFixed(2)),
+      forecastBiasEvaluations: forecastBias.evaluationCount,
+    },
+    explanation: {
+      title: `${cat.name} 고양이 기준 비용 추정`,
+      summary: [
+        `나이 ${catAge.toFixed(1)}세(${catAgeStageLabel(catAge)})를 반영해 비용을 계산했습니다.`,
+        `기대수명 ${catLifespanYears}세 기준으로 잔여 수명 ${remainingLifetimeYears.toFixed(1)}년을 반영했습니다.`,
+        `최근 고정지출 월평균 ${roundMoney(historicalFixedMonthly).toLocaleString("ko-KR")}원, 의료지출 ${roundMoney(historicalMedicalMonthly).toLocaleString("ko-KR")}원으로 계산됐습니다.`,
+      ],
+      sources: [catRecurringCostReference.source, catTreatmentCostReference.source],
+    },
+    insuranceModel,
+  };
+
+  const scenarioBasePlanned = plannedCareCost;
+  const scenarioBaseRisk = riskAdjustedCost;
+  const volatilityStep = clamp(medicalVolatility, 0, 1.4);
+  const scenarios = [
+    { scenario: "basic", plannedMultiplier: 1.0, riskMultiplier: 1.0 },
+    { scenario: "caution", plannedMultiplier: 1.08, riskMultiplier: 1.2 + volatilityStep * 0.06 },
+    { scenario: "high_risk", plannedMultiplier: 1.15, riskMultiplier: 1.42 + volatilityStep * 0.1 },
+  ] as const;
+
+  await tx.catCostForecast.createMany({
+    data: scenarios.map(({ scenario, plannedMultiplier, riskMultiplier }) => {
+      const scenarioPlannedCare = roundMoney(scenarioBasePlanned * plannedMultiplier);
+      const scenarioRiskReserve = roundMoney(scenarioBaseRisk * riskMultiplier);
+      const monthlyEstimate = roundMoney(fixedCost + scenarioPlannedCare + scenarioRiskReserve);
+      return {
+        catId,
+        scenario,
+        monthlyEstimate,
+        rangeMin: roundMoney(monthlyEstimate * (1 - forecastRangeSpread)),
+        rangeMax: roundMoney(monthlyEstimate * (1 + forecastRangeSpread)),
+        yearlyEstimate: roundMoney(monthlyEstimate * 12),
+        sixMonthEstimate: roundMoney(monthlyEstimate * 6),
+        lifetimeEstimate: roundMoney(monthlyEstimate * 12 * remainingLifetimeYears),
+        confidenceLevel,
+        breakdown: {
+          fixedCost,
+          foodCost: roundMoney(baseFoodCost),
+          suppliesCost: roundMoney(baseSuppliesCost),
+          groomingCost: roundMoney(baseGroomingCost),
+          insurancePremium,
+          plannedCareCost: scenarioPlannedCare,
+          riskAdjustedCost: scenarioRiskReserve,
+          riskReserveBeforeInsurance,
+          outlierReserveMonthly,
+          forecastBiasFactor: Number(variableHistoryBiasFactor.toFixed(2)),
+          experienceAlignmentFactor: Number(experienceAlignmentFactor.toFixed(2)),
+        },
+        assumptions,
+      };
+    }),
+  });
+
+  return scenarios.length;
+}
+
+export async function latestCatForecasts(tx: Tx, catId: bigint) {
+  const rows = await tx.catCostForecast.findMany({
+    where: { catId },
+    orderBy: [{ generatedAt: "desc" }, { id: "desc" }],
+  });
+
+  const latest = new Map<string, (typeof rows)[number]>();
+  for (const row of rows) {
+    if (!latest.has(row.scenario)) latest.set(row.scenario, row);
+  }
+
+  return {
+    basic: latest.get("basic") ?? null,
+    caution: latest.get("caution") ?? null,
+    highRisk: latest.get("high_risk") ?? null,
+    generatedAt: rows[0]?.generatedAt ?? null,
+  };
+}
+
 export async function latestForecasts(tx: Tx, dogId: bigint) {
   const rows = await tx.costForecast.findMany({
     where: { dogId },
